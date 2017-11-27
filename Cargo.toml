@@ -1,0 +1,13 @@
+[package]
+name = "soncon"
+version = "0.1.0"
+authors = ["Jordan Doyle <jordanjd@amazon.com>"]
+license = "MIT"
+
+[dependencies]
+clippy = {version = "*", optional = true}
+reqwest = "0.8"
+log = "0.3"
+ssdp = "0.6"
+xmltree = "0.6"
+error-chain = "0.11"
