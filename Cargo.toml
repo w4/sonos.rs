@@ -1,5 +1,5 @@
 [package]
-name = "soncon"
+name = "sonos"
 version = "0.1.0"
 authors = ["Jordan Doyle <jordanjd@amazon.com>"]
 license = "MIT"
