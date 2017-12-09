@@ -13,5 +13,3 @@ for device in devices {
     device.play();
 }
 ```
-
-If your rooms change you have to rediscover.

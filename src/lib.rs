@@ -19,10 +19,4 @@ pub use device::Track;
 pub use device::TransportState;
 pub use error::*;
 
-/// Discover devices.
-///
-/// You should only run this function once. It will block for
-/// 2 seconds while it scans.
-pub fn discover() -> Result<Vec<Speaker>> {
-    discovery::discover()
-}
+pub use discovery::discover;

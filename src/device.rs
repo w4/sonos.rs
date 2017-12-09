@@ -1,12 +1,13 @@
+extern crate regex;
 extern crate reqwest;
 extern crate xmltree;
-extern crate regex;
 
 use std::net::IpAddr;
 use error::*;
 use self::xmltree::Element;
 use self::reqwest::header::{ContentType, Headers};
 use self::regex::Regex;
+use std::io::Read;
 
 #[derive(Debug)]
 pub struct Speaker {
@@ -17,7 +18,7 @@ pub struct Speaker {
     pub hardware_version: String,
     pub serial_number: String,
     pub room: String,
-    pub coordinator: IpAddr,
+    pub uuid: String,
 }
 
 #[derive(Debug)]
@@ -41,52 +42,13 @@ pub enum TransportState {
 
 
 lazy_static! {
-    static ref COORDINATOR_REGEX: Regex = Regex::new(r"^https?://(.+?):1400/xml").expect("Failed to create regex");
+    static ref COORDINATOR_REGEX: Regex = Regex::new(r"^https?://(.+?):1400/xml")
+        .expect("Failed to create regex");
 }
 
 /// Get the text of the given element as a String
 fn element_to_string(el: &Element) -> String {
     el.text.to_owned().unwrap()
-}
-
-fn get_coordinator(ip: &IpAddr, uuid: &str) -> Result<IpAddr> {
-    let mut resp = reqwest::get(&format!("http://{}:1400/status/topology", ip))
-        .chain_err(|| "Failed to grab device description")?;
-
-    if !resp.status().is_success() {
-        return Err("Received a bad response from speaker".into());
-    }
-
-    use std::io::Read;
-    let mut content = String::new();
-    resp.read_to_string(&mut content);
-
-    // clean up xml so xmltree can read it
-    let content = content.replace("<?xml-stylesheet type=\"text/xsl\" href=\"/xml/review.xsl\"?>", "");
-
-    let elements = Element::parse(content.as_bytes()).chain_err(|| "Failed to parse xml")?;
-    let zone_players = elements
-        .get_child("ZonePlayers")
-        .ok_or("The device gave us a bad response.")?;
-
-    // get the group identifier from the given player
-    let group = zone_players.children.iter()
-        .find(|ref child| child.attributes.get("uuid").unwrap() == uuid)
-        .ok_or("Failed to get device group")?
-        .attributes
-        .get("group")
-        .unwrap();
-
-    Ok(COORDINATOR_REGEX.captures(zone_players.children.iter()
-            .find(|ref child| child.attributes.get("coordinator").unwrap_or(&"false".to_string()) == "true" &&
-                                         child.attributes.get("group").unwrap_or(&"".to_string()) == group)
-            .ok_or(format!("Couldn't find coordinator for the given uuid ({})", uuid))?
-            .attributes
-            .get("location")
-            .ok_or("Failed to parse coordinator URL")?)
-        .ok_or("Failed to parse coordinator URL for IP")?[1]
-        .parse()
-        .chain_err(|| "Failed to parse IP address")?)
 }
 
 impl Speaker {
@@ -125,12 +87,60 @@ impl Speaker {
                 .get_child("roomName")
                 .ok_or("Failed to parse device description")?),
             // we slice the UDN to remove "uuid:"
-            coordinator: get_coordinator(&ip, &element_to_string(
-                device_description
-                    .get_child("UDN")
-                    .ok_or("Failed to parse device description")?
-            )[5..])?
+            uuid: element_to_string(device_description
+                .get_child("UDN")
+                .ok_or("Failed to parse device description")?)[5..]
+                .to_string(),
         })
+    }
+
+    /// Get the coordinator for this speaker.
+    pub fn coordinator(&self) -> Result<IpAddr> {
+        let mut resp = reqwest::get(&format!("http://{}:1400/status/topology", self.ip))
+            .chain_err(|| "Failed to grab device description")?;
+
+        if !resp.status().is_success() {
+            return Err("Received a bad response from speaker".into());
+        }
+
+        let mut content = String::new();
+        resp.read_to_string(&mut content);
+
+        // clean up xml so xmltree can read it
+        let content = content.replace(
+            "<?xml-stylesheet type=\"text/xsl\" href=\"/xml/review.xsl\"?>",
+            "",
+        );
+
+        // parse the topology xml
+        let elements = Element::parse(content.as_bytes()).chain_err(|| "Failed to parse xml")?;
+        let zone_players = elements
+            .get_child("ZonePlayers")
+            .ok_or("The speaker gave us a bad response")?;
+
+        // get the group identifier from the given player
+        let group = zone_players
+            .children
+            .iter()
+            .find(|ref child| child.attributes.get("uuid").unwrap() == &self.uuid)
+            .ok_or("Failed to get device group")?
+            .attributes
+            .get("group")
+            .unwrap();
+
+        Ok(COORDINATOR_REGEX
+            .captures(zone_players.children.iter()
+                // get the coordinator for the given group
+                .find(|ref child|
+                    child.attributes.get("coordinator").unwrap_or(&"false".to_string()) == "true" &&
+                        child.attributes.get("group").unwrap_or(&"".to_string()) == group)
+                .ok_or(format!("Couldn't find coordinator for the given uuid ({})", self.uuid))?
+                .attributes
+                .get("location")
+                .ok_or("Failed to parse coordinator URL")?)
+            .ok_or("Failed to parse coordinator URL for IP")?[1]
+            .parse()
+            .chain_err(|| "Failed to parse IP address")?)
     }
 
     /// Call the Sonos SOAP endpoint
@@ -148,16 +158,19 @@ impl Speaker {
         service: &str,
         action: &str,
         payload: &str,
-        coordinator: bool
+        coordinator: bool,
     ) -> Result<Element> {
         let mut headers = Headers::new();
         headers.set(ContentType::xml());
         headers.set_raw("SOAPAction", format!("{}#{}", service, action));
 
         let client = reqwest::Client::new();
+        let coordinator = if coordinator { self.coordinator()? } else { self.ip };
+
+        debug!("Running {}#{} on {}", service, action, coordinator);
 
         let request = client
-            .post(&format!("http://{}:1400/{}", if coordinator { self.coordinator } else { self.ip }, endpoint))
+            .post(&format!("http://{}:1400/{}", coordinator, endpoint))
             .headers(headers)
             .body(format!(
                 r#"
@@ -176,8 +189,8 @@ impl Speaker {
             .send()
             .chain_err(|| "Failed to call Sonos controller.")?;
 
-        let element = Element::parse(request)
-            .chain_err(|| "Failed to parse XML from Sonos controller")?;
+        let element =
+            Element::parse(request).chain_err(|| "Failed to parse XML from Sonos controller")?;
 
         Ok(
             element
@@ -189,7 +202,7 @@ impl Speaker {
         )
     }
 
-    // Play the current track
+    /// Play the current track
     pub fn play(&self) -> Result<()> {
         self.soap(
             "MediaRenderer/AVTransport/Control",
@@ -202,7 +215,7 @@ impl Speaker {
         Ok(())
     }
 
-    // Pause the current track
+    /// Pause the current track
     pub fn pause(&self) -> Result<()> {
         self.soap(
             "MediaRenderer/AVTransport/Control",
@@ -215,7 +228,7 @@ impl Speaker {
         Ok(())
     }
 
-    // Stop the current queue
+    /// Stop the current queue
     pub fn stop(&self) -> Result<()> {
         self.soap(
             "MediaRenderer/AVTransport/Control",
@@ -228,7 +241,7 @@ impl Speaker {
         Ok(())
     }
 
-    // Skip the current track
+    /// Skip the current track
     pub fn next(&self) -> Result<()> {
         self.soap(
             "MediaRenderer/AVTransport/Control",
@@ -241,7 +254,7 @@ impl Speaker {
         Ok(())
     }
 
-    // Go to the previous track
+    /// Go to the previous track
     pub fn previous(&self) -> Result<()> {
         self.soap(
             "MediaRenderer/AVTransport/Control",
@@ -254,7 +267,7 @@ impl Speaker {
         Ok(())
     }
 
-    // Seek to a time on the current track
+    /// Seek to a time on the current track
     pub fn seek(&self, hours: &u8, minutes: &u8, seconds: &u8) -> Result<()> {
         self.soap(
             "MediaRenderer/AVTransport/Control",
@@ -272,7 +285,7 @@ impl Speaker {
         Ok(())
     }
 
-    // Change the track, beginning at 1
+    /// Change the track, beginning at 1
     pub fn play_queue_item(&self, track: &u64) -> Result<()> {
         self.soap(
             "MediaRenderer/AVTransport/Control",
@@ -288,7 +301,7 @@ impl Speaker {
         Ok(())
     }
 
-    // Remove track at index from queue, beginning at 1
+    /// Remove track at index from queue, beginning at 1
     pub fn remove_track(&self, track: &u64) -> Result<()> {
         self.soap(
             "MediaRenderer/AVTransport/Control",
@@ -304,12 +317,12 @@ impl Speaker {
         Ok(())
     }
 
-    // Add a new track to the end of the queue
+    /// Add a new track to the end of the queue
     pub fn queue_track(&self, uri: &str) -> Result<()> {
         self.soap(
             "MediaRenderer/AVTransport/Control",
             "urn:schemas-upnp-org:service:AVTransport:1",
-            "RemoveTrackFromQueue",
+            "AddURIToQueue",
             &format!(
                 r#"
                   <InstanceID>0</InstanceID>
@@ -325,33 +338,12 @@ impl Speaker {
         Ok(())
     }
 
-    // Add a track to the queue to play next
-    pub fn play_next(&self, uri: &str) -> Result<()> {
-        self.soap(
-            "MediaRenderer/AVTransport/Control",
-            "urn:schemas-upnp-org:service:AVTransport:1",
-            "RemoveTrackFromQueue",
-            &format!(
-                r#"
-                  <InstanceID>0</InstanceID>
-                  <EnqueuedURI>{}</EnqueuedURI>
-                  <EnqueuedURIMetaData></EnqueuedURIMetaData>
-                  <DesiredFirstTrackNumberEnqueued>0</DesiredFirstTrackNumberEnqueued>
-                  <EnqueueAsNext>1</EnqueueAsNext>"#,
-                uri
-            ),
-            true,
-        )?;
-
-        Ok(())
-    }
-
-    // Replace the current track with a new one
+    /// Replace the current track with a new one
     pub fn play_track(&self, uri: &str) -> Result<()> {
         self.soap(
             "MediaRenderer/AVTransport/Control",
             "urn:schemas-upnp-org:service:AVTransport:1",
-            "RemoveTrackFromQueue",
+            "SetAVTransportURI",
             &format!(
                 r#"
                   <InstanceID>0</InstanceID>
@@ -365,7 +357,7 @@ impl Speaker {
         Ok(())
     }
 
-    // Remove every track from the queue
+    /// Remove every track from the queue
     pub fn clear_queue(&self) -> Result<()> {
         self.soap(
             "MediaRenderer/AVTransport/Control",
@@ -378,7 +370,7 @@ impl Speaker {
         Ok(())
     }
 
-    // Get the current volume
+    /// Get the current volume
     pub fn volume(&self) -> Result<u8> {
         let res = self.soap(
             "MediaRenderer/RenderingControl/Control",
@@ -399,7 +391,7 @@ impl Speaker {
         Ok(volume)
     }
 
-    // Set a new volume from 0-100.
+    /// Set a new volume from 0-100.
     pub fn set_volume(&self, volume: u8) -> Result<()> {
         if volume > 100 {
             panic!("Volume must be between 0 and 100, got {}.", volume);
@@ -421,7 +413,7 @@ impl Speaker {
         Ok(())
     }
 
-    // Check if this player is currently muted
+    /// Check if this player is currently muted
     pub fn muted(&self) -> Result<bool> {
         let resp = self.soap(
             "MediaRenderer/RenderingControl/Control",
@@ -431,19 +423,17 @@ impl Speaker {
             false,
         )?;
 
-        Ok(
-            match element_to_string(resp.get_child("CurrentMute")
-                .ok_or("Failed to get current mute status")?)
-                .as_str()
-            {
-                "1" => true,
-                "0" => false,
-                _ => false,
-            },
-        )
+        Ok(match element_to_string(resp.get_child("CurrentMute")
+            .ok_or("Failed to get current mute status")?)
+            .as_str()
+        {
+            "1" => true,
+            "0" => false,
+            _ => false,
+        })
     }
 
-    // Mute the current player
+    /// Mute the current player
     pub fn mute(&self) -> Result<()> {
         self.soap(
             "MediaRenderer/RenderingControl/Control",
@@ -456,7 +446,7 @@ impl Speaker {
         Ok(())
     }
 
-    // Unmute the current player
+    /// Unmute the current player
     pub fn unmute(&self) -> Result<()> {
         self.soap(
             "MediaRenderer/RenderingControl/Control",
@@ -469,7 +459,7 @@ impl Speaker {
         Ok(())
     }
 
-    // Get the transport state of the current player
+    /// Get the transport state of the current player
     pub fn transport_state(&self) -> Result<TransportState> {
         let resp = self.soap(
             "MediaRenderer/AVTransport/Control",
@@ -493,7 +483,7 @@ impl Speaker {
         )
     }
 
-    // Get information about the current track
+    /// Get information about the current track
     pub fn track(&self) -> Result<Track> {
         let resp = self.soap(
             "MediaRenderer/AVTransport/Control",

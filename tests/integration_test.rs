@@ -3,7 +3,6 @@ extern crate sonos;
 #[test]
 fn can_discover_devices() {
     let devices = sonos::discover().unwrap();
-    println!("{:#?}", devices);
     assert!(devices.len() > 0, "No devices discovered");
 }
 

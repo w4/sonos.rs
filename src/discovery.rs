@@ -3,12 +3,12 @@ extern crate ssdp;
 use self::ssdp::FieldMap;
 use self::ssdp::header::{HeaderMut, HeaderRef, Man, MX, ST};
 use self::ssdp::message::{Multicast, SearchRequest, SearchResponse};
-use std::collections::HashMap;
 use device::Speaker;
 use error::*;
 
 const SONOS_URN: &str = "schemas-upnp-org:device:ZonePlayer:1";
 
+/// Convenience method to grab a header from an SSDP search as a string.
 fn get_header(msg: &SearchResponse, header: &str) -> Result<String> {
     let bytes = msg.get_raw(header)
         .chain_err(|| "Failed to get header from discovery response")?;
@@ -17,6 +17,9 @@ fn get_header(msg: &SearchResponse, header: &str) -> Result<String> {
         .chain_err(|| "Failed to convert header to UTF-8")
 }
 
+/// Discover all speakers on the current network.
+///
+/// This method **will** block for 2 seconds while waiting for broadcast responses.
 pub fn discover() -> Result<Vec<Speaker>> {
     let mut request = SearchRequest::new();
 
@@ -34,7 +37,8 @@ pub fn discover() -> Result<Vec<Speaker>> {
             continue;
         }
 
-        speakers.push(Speaker::from_ip(src.ip()).chain_err(|| "Failed to get device information")?);
+        speakers.push(Speaker::from_ip(src.ip())
+            .chain_err(|| "Failed to get device information")?);
     }
 
     Ok(speakers)
