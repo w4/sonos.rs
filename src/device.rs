@@ -1,20 +1,23 @@
 extern crate reqwest;
 extern crate xmltree;
+extern crate regex;
 
 use std::net::IpAddr;
 use error::*;
 use self::xmltree::Element;
 use self::reqwest::header::{ContentType, Headers};
+use self::regex::Regex;
 
 #[derive(Debug)]
-pub struct Device {
+pub struct Speaker {
     pub ip: IpAddr,
     pub model: String,
     pub model_number: String,
     pub software_version: String,
     pub hardware_version: String,
     pub serial_number: String,
-    pub room: Room,
+    pub room: String,
+    pub coordinator: IpAddr,
 }
 
 #[derive(Debug)]
@@ -29,11 +32,6 @@ pub struct Track {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct Room {
-    pub room: String,
-}
-
-#[derive(Debug, PartialEq)]
 pub enum TransportState {
     Stopped,
     Playing,
@@ -41,62 +39,117 @@ pub enum TransportState {
     Transitioning,
 }
 
-impl From<String> for Room {
-    fn from(str: String) -> Self {
-        Room { room: str }
-    }
+
+lazy_static! {
+    static ref COORDINATOR_REGEX: Regex = Regex::new(r"^https?://(.+?):1400/xml").expect("Failed to create regex");
 }
 
-impl Device {
-    // Create a new instance of this struct from an IP address
-    pub fn from_ip(ip: IpAddr) -> Result<Device> {
+/// Get the text of the given element as a String
+fn element_to_string(el: &Element) -> String {
+    el.text.to_owned().unwrap()
+}
+
+fn get_coordinator(ip: &IpAddr, uuid: &str) -> Result<IpAddr> {
+    let mut resp = reqwest::get(&format!("http://{}:1400/status/topology", ip))
+        .chain_err(|| "Failed to grab device description")?;
+
+    if !resp.status().is_success() {
+        return Err("Received a bad response from speaker".into());
+    }
+
+    use std::io::Read;
+    let mut content = String::new();
+    resp.read_to_string(&mut content);
+
+    // clean up xml so xmltree can read it
+    let content = content.replace("<?xml-stylesheet type=\"text/xsl\" href=\"/xml/review.xsl\"?>", "");
+
+    let elements = Element::parse(content.as_bytes()).chain_err(|| "Failed to parse xml")?;
+    let zone_players = elements
+        .get_child("ZonePlayers")
+        .ok_or("The device gave us a bad response.")?;
+
+    // get the group identifier from the given player
+    let group = zone_players.children.iter()
+        .find(|ref child| child.attributes.get("uuid").unwrap() == uuid)
+        .ok_or("Failed to get device group")?
+        .attributes
+        .get("group")
+        .unwrap();
+
+    Ok(COORDINATOR_REGEX.captures(zone_players.children.iter()
+            .find(|ref child| child.attributes.get("coordinator").unwrap_or(&"false".to_string()) == "true" &&
+                                         child.attributes.get("group").unwrap_or(&"".to_string()) == group)
+            .ok_or(format!("Couldn't find coordinator for the given uuid ({})", uuid))?
+            .attributes
+            .get("location")
+            .ok_or("Failed to parse coordinator URL")?)
+        .ok_or("Failed to parse coordinator URL for IP")?[1]
+        .parse()
+        .chain_err(|| "Failed to parse IP address")?)
+}
+
+impl Speaker {
+    /// Create a new instance of this struct from an IP address
+    pub fn from_ip(ip: IpAddr) -> Result<Speaker> {
         let resp = reqwest::get(&format!("http://{}:1400/xml/device_description.xml", ip))
             .chain_err(|| "Failed to grab device description")?;
 
         if !resp.status().is_success() {
-            return Err("Received a bad response from device".into());
+            return Err("Received a bad response from speaker".into());
         }
 
-        let mut device = Device {
-            ip,
-            model: "".to_string(),
-            model_number: "".to_string(),
-            software_version: "".to_string(),
-            hardware_version: "".to_string(),
-            serial_number: "".to_string(),
-            room: "".to_string().into(),
-        };
-
-        Device::parse_response(&mut device, resp);
-
-        Ok(device)
-    }
-
-    fn element_to_string(el: &Element) -> String {
-        el.text.to_owned().unwrap()
-    }
-
-    fn parse_response(device: &mut Device, r: reqwest::Response) {
-        let elements = Element::parse(r).unwrap();
+        let elements = Element::parse(resp).unwrap();
         let device_description = elements
             .get_child("device")
-            .expect("The device gave us a bad response.");
+            .ok_or("The device gave us a bad response.")?;
 
-        for el in &device_description.children {
-            match el.name.as_str() {
-                "modelName" => device.model = Device::element_to_string(el),
-                "modelNumber" => device.model_number = Device::element_to_string(el),
-                "softwareVersion" => device.software_version = Device::element_to_string(el),
-                "hardwareVersion" => device.hardware_version = Device::element_to_string(el),
-                "serialNum" => device.serial_number = Device::element_to_string(el),
-                "roomName" => device.room = Device::element_to_string(el).into(),
-                _ => {}
-            }
-        }
+        Ok(Speaker {
+            ip,
+            model: element_to_string(device_description
+                .get_child("modelName")
+                .ok_or("Failed to parse device description")?),
+            model_number: element_to_string(device_description
+                .get_child("modelNumber")
+                .ok_or("Failed to parse device description")?),
+            software_version: element_to_string(device_description
+                .get_child("softwareVersion")
+                .ok_or("Failed to parse device description")?),
+            hardware_version: element_to_string(device_description
+                .get_child("hardwareVersion")
+                .ok_or("Failed to parse device description")?),
+            serial_number: element_to_string(device_description
+                .get_child("serialNum")
+                .ok_or("Failed to parse device description")?),
+            room: element_to_string(device_description
+                .get_child("roomName")
+                .ok_or("Failed to parse device description")?),
+            // we slice the UDN to remove "uuid:"
+            coordinator: get_coordinator(&ip, &element_to_string(
+                device_description
+                    .get_child("UDN")
+                    .ok_or("Failed to parse device description")?
+            )[5..])?
+        })
     }
 
-    // Call the Sonos SOAP endpoint
-    fn soap(&self, endpoint: &str, service: &str, action: &str, payload: &str) -> Result<Element> {
+    /// Call the Sonos SOAP endpoint
+    ///
+    /// # Arguments
+    /// * `endpoint` - The SOAP endpoint to call (eg. MediaRenderer/AVTransport/Control)
+    /// * `service` - The SOAP service to call (eg. urn:schemas-upnp-org:service:AVTransport:1)
+    /// * `action` - The action to call on the soap service (eg. Play)
+    /// * `payload` - XML doc to pass inside the action call body
+    /// * `coordinator` - Whether this SOAP call should be performed on the group coordinator or
+    ///                   the speaker it was called on
+    pub fn soap(
+        &self,
+        endpoint: &str,
+        service: &str,
+        action: &str,
+        payload: &str,
+        coordinator: bool
+    ) -> Result<Element> {
         let mut headers = Headers::new();
         headers.set(ContentType::xml());
         headers.set_raw("SOAPAction", format!("{}#{}", service, action));
@@ -104,7 +157,7 @@ impl Device {
         let client = reqwest::Client::new();
 
         let request = client
-            .post(&format!("http://{}:1400/{}", self.ip, endpoint))
+            .post(&format!("http://{}:1400/{}", if coordinator { self.coordinator } else { self.ip }, endpoint))
             .headers(headers)
             .body(format!(
                 r#"
@@ -123,8 +176,8 @@ impl Device {
             .send()
             .chain_err(|| "Failed to call Sonos controller.")?;
 
-        let element =
-            Element::parse(request).chain_err(|| "Failed to parse XML from Sonos controller")?;
+        let element = Element::parse(request)
+            .chain_err(|| "Failed to parse XML from Sonos controller")?;
 
         Ok(
             element
@@ -143,6 +196,7 @@ impl Device {
             "urn:schemas-upnp-org:service:AVTransport:1",
             "Play",
             "<InstanceID>0</InstanceID><Speed>1</Speed>",
+            true,
         )?;
 
         Ok(())
@@ -155,6 +209,7 @@ impl Device {
             "urn:schemas-upnp-org:service:AVTransport:1",
             "Pause",
             "<InstanceID>0</InstanceID>",
+            true,
         )?;
 
         Ok(())
@@ -167,6 +222,7 @@ impl Device {
             "urn:schemas-upnp-org:service:AVTransport:1",
             "Stop",
             "<InstanceID>0</InstanceID>",
+            true,
         )?;
 
         Ok(())
@@ -179,6 +235,7 @@ impl Device {
             "urn:schemas-upnp-org:service:AVTransport:1",
             "Next",
             "<InstanceID>0</InstanceID>",
+            true,
         )?;
 
         Ok(())
@@ -191,6 +248,7 @@ impl Device {
             "urn:schemas-upnp-org:service:AVTransport:1",
             "Previous",
             "<InstanceID>0</InstanceID>",
+            true,
         )?;
 
         Ok(())
@@ -208,6 +266,7 @@ impl Device {
                 minutes,
                 seconds
             ),
+            true,
         )?;
 
         Ok(())
@@ -223,6 +282,7 @@ impl Device {
                 "<InstanceID>0</InstanceID><Unit>TRACK_NR</Unit><Target>{}</Target>",
                 track
             ),
+            true,
         )?;
 
         Ok(())
@@ -238,6 +298,7 @@ impl Device {
                 "<InstanceID>0</InstanceID><ObjectID>Q:0/{}</ObjectID>",
                 track
             ),
+            true,
         )?;
 
         Ok(())
@@ -258,6 +319,7 @@ impl Device {
                   <EnqueueAsNext>0</EnqueueAsNext>"#,
                 uri
             ),
+            true,
         )?;
 
         Ok(())
@@ -278,6 +340,7 @@ impl Device {
                   <EnqueueAsNext>1</EnqueueAsNext>"#,
                 uri
             ),
+            true,
         )?;
 
         Ok(())
@@ -296,6 +359,7 @@ impl Device {
                   <CurrentURIMetaData></CurrentURIMetaData>"#,
                 uri
             ),
+            true,
         )?;
 
         Ok(())
@@ -308,6 +372,7 @@ impl Device {
             "urn:schemas-upnp-org:service:AVTransport:1",
             "RemoveAllTracksFromQueue",
             "<InstanceID>0</InstanceID>",
+            true,
         )?;
 
         Ok(())
@@ -320,6 +385,7 @@ impl Device {
             "urn:schemas-upnp-org:service:RenderingControl:1",
             "GetVolume",
             "<InstanceID>0</InstanceID><Channel>Master</Channel>",
+            false,
         )?;
 
         let volume = res.get_child("CurrentVolume")
@@ -350,6 +416,7 @@ impl Device {
                   <DesiredVolume>{}</DesiredVolume>"#,
                 volume
             ),
+            false,
         )?;
         Ok(())
     }
@@ -361,10 +428,11 @@ impl Device {
             "urn:schemas-upnp-org:service:RenderingControl:1",
             "GetMute",
             &format!("<InstanceID>0</InstanceID><Channel>Master</Channel>"),
+            false,
         )?;
 
         Ok(
-            match Device::element_to_string(resp.get_child("CurrentMute")
+            match element_to_string(resp.get_child("CurrentMute")
                 .ok_or("Failed to get current mute status")?)
                 .as_str()
             {
@@ -382,6 +450,7 @@ impl Device {
             "urn:schemas-upnp-org:service:RenderingControl:1",
             "SetMute",
             "<InstanceID>0</InstanceID><Channel>Master</Channel><DesiredMute>1</DesiredMute>",
+            false,
         )?;
 
         Ok(())
@@ -394,6 +463,7 @@ impl Device {
             "urn:schemas-upnp-org:service:RenderingControl:1",
             "SetMute",
             "<InstanceID>0</InstanceID><Channel>Master</Channel><DesiredMute>0</DesiredMute>",
+            false,
         )?;
 
         Ok(())
@@ -406,11 +476,11 @@ impl Device {
             "urn:schemas-upnp-org:service:AVTransport:1",
             "GetTransportInfo",
             "<InstanceID>0</InstanceID>",
+            false,
         )?;
 
-
         Ok(
-            match Device::element_to_string(resp.get_child("CurrentTransportState")
+            match element_to_string(resp.get_child("CurrentTransportState")
                 .ok_or("Failed to get current transport status")?)
                 .as_str()
             {
@@ -430,10 +500,11 @@ impl Device {
             "urn:schemas-upnp-org:service:AVTransport:1",
             "GetPositionInfo",
             "<InstanceID>0</InstanceID>",
+            true,
         )?;
 
         let metadata = Element::parse(
-            Device::element_to_string(resp.get_child("TrackMetaData")
+            element_to_string(resp.get_child("TrackMetaData")
                 .ok_or("Failed to get track metadata")?)
                 .as_bytes(),
         ).chain_err(|| "Failed to parse XML from Sonos controller")?;
@@ -443,24 +514,24 @@ impl Device {
             .chain_err(|| "Failed to parse XML from Sonos controller")?;
 
         Ok(Track {
-            title: Device::element_to_string(metadata
+            title: element_to_string(metadata
                 .get_child("title")
                 .chain_err(|| "Failed to get title")?),
-            artist: Device::element_to_string(metadata
+            artist: element_to_string(metadata
                 .get_child("creator")
                 .chain_err(|| "Failed to get artist")?),
-            album: Device::element_to_string(metadata
+            album: element_to_string(metadata
                 .get_child("album")
                 .chain_err(|| "Failed to get album")?),
-            queue_position: Device::element_to_string(resp.get_child("Track")
+            queue_position: element_to_string(resp.get_child("Track")
                 .chain_err(|| "Failed to get queue position")?)
                 .parse::<u64>()
                 .unwrap(),
-            uri: Device::element_to_string(resp.get_child("TrackURI")
+            uri: element_to_string(resp.get_child("TrackURI")
                 .chain_err(|| "Failed to get track uri")?),
-            duration: Device::element_to_string(resp.get_child("TrackDuration")
+            duration: element_to_string(resp.get_child("TrackDuration")
                 .chain_err(|| "Failed to get track duration")?),
-            relative_time: Device::element_to_string(resp.get_child("RelTime")
+            relative_time: element_to_string(resp.get_child("RelTime")
                 .chain_err(|| "Failed to get relative time")?),
         })
     }
