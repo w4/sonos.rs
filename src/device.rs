@@ -59,41 +59,41 @@ impl Speaker {
     /// Create a new instance of this struct from an IP address
     pub fn from_ip(ip: IpAddr) -> Result<Speaker> {
         let resp = reqwest::get(&format!("http://{}:1400/xml/device_description.xml", ip))
-            .chain_err(|| "Failed to grab device description")?;
+            .chain_err(|| ErrorKind::DeviceUnreachable)?;
 
         if !resp.status().is_success() {
-            return Err("Received a bad response from speaker".into());
+            return Err(ErrorKind::BadResponse.into());
         }
 
         let elements = Element::parse(resp).unwrap();
         let device_description = elements
             .get_child("device")
-            .ok_or("The device gave us a bad response.")?;
+            .chain_err(|| ErrorKind::ParseError)?;
 
         Ok(Speaker {
             ip,
             model: element_to_string(device_description
                 .get_child("modelName")
-                .ok_or("Failed to parse device description")?),
+                .chain_err(|| ErrorKind::ParseError)?),
             model_number: element_to_string(device_description
                 .get_child("modelNumber")
-                .ok_or("Failed to parse device description")?),
+                .chain_err(|| ErrorKind::ParseError)?),
             software_version: element_to_string(device_description
                 .get_child("softwareVersion")
-                .ok_or("Failed to parse device description")?),
+                .chain_err(|| ErrorKind::ParseError)?),
             hardware_version: element_to_string(device_description
                 .get_child("hardwareVersion")
-                .ok_or("Failed to parse device description")?),
+                .chain_err(|| ErrorKind::ParseError)?),
             serial_number: element_to_string(device_description
                 .get_child("serialNum")
-                .ok_or("Failed to parse device description")?),
+                .chain_err(|| ErrorKind::ParseError)?),
             name: element_to_string(device_description
                 .get_child("roomName")
-                .ok_or("Failed to parse device description")?),
+                .chain_err(|| ErrorKind::ParseError)?),
             // we slice the UDN to remove "uuid:"
             uuid: element_to_string(device_description
                 .get_child("UDN")
-                .ok_or("Failed to parse device description")?)[5..]
+                .chain_err(|| ErrorKind::ParseError)?)[5..]
                 .to_string(),
         })
     }
@@ -101,15 +101,15 @@ impl Speaker {
     /// Get the coordinator for this speaker.
     pub fn coordinator(&self) -> Result<IpAddr> {
         let mut resp = reqwest::get(&format!("http://{}:1400/status/topology", self.ip))
-            .chain_err(|| "Failed to grab device description")?;
+            .chain_err(|| ErrorKind::DeviceUnreachable)?;
 
         if !resp.status().is_success() {
-            return Err("Received a bad response from speaker".into());
+            return Err(ErrorKind::BadResponse.into());
         }
 
         let mut content = String::new();
         resp.read_to_string(&mut content)
-            .chain_err(|| "Failed to read Sonos topology")?;
+            .chain_err(|| ErrorKind::BadResponse)?;
 
         // clean up xml so xmltree can read it
         let content = content.replace(
@@ -118,17 +118,17 @@ impl Speaker {
         );
 
         // parse the topology xml
-        let elements = Element::parse(content.as_bytes()).chain_err(|| "Failed to parse xml")?;
+        let elements = Element::parse(content.as_bytes()).chain_err(|| ErrorKind::ParseError)?;
         let zone_players = elements
             .get_child("ZonePlayers")
-            .ok_or("The speaker gave us a bad response")?;
+            .chain_err(|| ErrorKind::ParseError)?;
 
         // get the group identifier from the given player
         let group = zone_players
             .children
             .iter()
             .find(|ref child| child.attributes.get("uuid").unwrap() == &self.uuid)
-            .ok_or("Failed to get device group")?
+            .chain_err(|| ErrorKind::DeviceNotFound(self.uuid.to_string()))?
             .attributes
             .get("group")
             .unwrap();
@@ -139,13 +139,13 @@ impl Speaker {
                 .find(|ref child|
                     child.attributes.get("coordinator").unwrap_or(&"false".to_string()) == "true" &&
                         child.attributes.get("group").unwrap_or(&"".to_string()) == group)
-                .ok_or(format!("Couldn't find coordinator for the given uuid ({})", self.uuid))?
+                .chain_err(|| ErrorKind::DeviceNotFound(self.uuid.to_string()))?
                 .attributes
                 .get("location")
-                .ok_or("Failed to parse coordinator URL")?)
-            .ok_or("Failed to parse coordinator URL for IP")?[1]
+                .chain_err(|| ErrorKind::ParseError)?)
+            .chain_err(|| ErrorKind::ParseError)?[1]
             .parse()
-            .chain_err(|| "Failed to parse IP address")?)
+            .chain_err(|| ErrorKind::ParseError)?)
     }
 
     /// Call the Sonos SOAP endpoint
@@ -192,13 +192,13 @@ impl Speaker {
                 payload = payload
             ))
             .send()
-            .chain_err(|| "Failed to call Sonos controller.")?;
+            .chain_err(|| ErrorKind::DeviceUnreachable)?;
 
         let element =
-            Element::parse(request).chain_err(|| "Failed to parse XML from Sonos controller")?;
+            Element::parse(request).chain_err(|| ErrorKind::ParseError)?;
 
         let body = element.get_child("Body")
-            .ok_or("Failed to get body element")?;
+            .chain_err(|| ErrorKind::ParseError)?;
 
         if let Some(fault) = body.get_child("Fault") {
             let error_code = element_to_string(fault.get_child("detail")
@@ -216,7 +216,7 @@ impl Speaker {
         } else {
             Ok(body
                 .get_child(format!("{}Response", action))
-                .ok_or(format!("Failed to find response element {:?}", element))?
+                .chain_err(|| ErrorKind::ParseError)?
                 .clone())
         }
     }
@@ -428,10 +428,10 @@ impl Speaker {
         )?;
 
         let volume = res.get_child("CurrentVolume")
-            .ok_or("Failed to get current volume")?
+            .chain_err(|| ErrorKind::ParseError)?
             .text
             .to_owned()
-            .ok_or("Failed to get text")?
+            .chain_err(|| ErrorKind::ParseError)?
             .parse::<u8>()
             .unwrap();
 
@@ -471,7 +471,7 @@ impl Speaker {
         )?;
 
         Ok(match element_to_string(resp.get_child("CurrentMute")
-            .ok_or("Failed to get current mute status")?)
+            .chain_err(|| ErrorKind::ParseError)?)
             .as_str()
         {
             "1" => true,
@@ -518,7 +518,7 @@ impl Speaker {
 
         Ok(
             match element_to_string(resp.get_child("CurrentTransportState")
-                .ok_or("Failed to get current transport status")?)
+                .chain_err(|| ErrorKind::ParseError)?)
                 .as_str()
             {
                 "STOPPED" => TransportState::Stopped,
@@ -545,24 +545,24 @@ impl Speaker {
 
         let metadata = Element::parse(
             element_to_string(resp.get_child("TrackMetaData")
-                .ok_or("Failed to get track metadata")?)
+                .chain_err(|| ErrorKind::ParseError)?)
                 .as_bytes(),
-        ).chain_err(|| "Failed to parse XML from Sonos controller")?;
+        ).chain_err(|| ErrorKind::ParseError)?;
 
         let metadata = metadata
             .get_child("item")
-            .chain_err(|| "Failed to parse XML from Sonos controller")?;
+            .chain_err(|| ErrorKind::ParseError)?;
 
         // convert the given hh:mm:ss to a Duration
         let duration: Vec<u64> = element_to_string(resp.get_child("TrackDuration")
-            .chain_err(|| "Failed to get track duration")?)
+            .chain_err(|| ErrorKind::ParseError)?)
             .splitn(3, ":")
             .map(|s| s.parse::<u64>().unwrap())
             .collect();
         let duration = Duration::from_secs((duration[0] * 3600) + (duration[1] * 60) + duration[2]);
 
         let running_time: Vec<u64> = element_to_string(resp.get_child("RelTime")
-            .chain_err(|| "Failed to get relative time")?)
+            .chain_err(|| ErrorKind::ParseError)?)
             .splitn(3, ":")
             .map(|s| s.parse::<u64>().unwrap())
             .collect();
@@ -571,19 +571,19 @@ impl Speaker {
         Ok(Track {
             title: element_to_string(metadata
                 .get_child("title")
-                .chain_err(|| "Failed to get title")?),
+                .chain_err(|| ErrorKind::ParseError)?),
             artist: element_to_string(metadata
                 .get_child("creator")
-                .chain_err(|| "Failed to get artist")?),
+                .chain_err(|| ErrorKind::ParseError)?),
             album: element_to_string(metadata
                 .get_child("album")
-                .chain_err(|| "Failed to get album")?),
+                .chain_err(|| ErrorKind::ParseError)?),
             queue_position: element_to_string(resp.get_child("Track")
-                .chain_err(|| "Failed to get queue position")?)
+                .chain_err(|| ErrorKind::ParseError)?)
                 .parse::<u64>()
                 .unwrap(),
             uri: element_to_string(resp.get_child("TrackURI")
-                .chain_err(|| "Failed to get track uri")?),
+                .chain_err(|| ErrorKind::ParseError)?),
             duration,
             running_time,
         })

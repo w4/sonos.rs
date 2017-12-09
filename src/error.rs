@@ -9,6 +9,21 @@ error_chain! {
             description("An error occurred when attempting to parse SOAP XML from Sonos")
             display("Failed to parse Sonos response XML")
         }
+
+        DeviceUnreachable {
+            description("An error occurred when attempting to contact the device")
+            display("Failed to call Sonos endpoint")
+        }
+
+        BadResponse {
+            description("The device returned a bad response")
+            display("Received a non-success response from Sonos")
+        }
+
+        DeviceNotFound(identifier: String) {
+            description("An error occurred when trying to find device")
+            display("Couldn't find a device by the given identifier ({})", identifier)
+        }
     }
 }
 

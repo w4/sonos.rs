@@ -11,10 +11,10 @@ const SONOS_URN: &str = "schemas-upnp-org:device:ZonePlayer:1";
 /// Convenience method to grab a header from an SSDP search as a string.
 fn get_header(msg: &SearchResponse, header: &str) -> Result<String> {
     let bytes = msg.get_raw(header)
-        .chain_err(|| "Failed to get header from discovery response")?;
+        .chain_err(|| ErrorKind::ParseError)?;
 
     String::from_utf8(bytes.get(0).unwrap().to_vec())
-        .chain_err(|| "Failed to convert header to UTF-8")
+        .chain_err(|| ErrorKind::ParseError)
 }
 
 /// Discover all speakers on the current network.
@@ -38,7 +38,7 @@ pub fn discover() -> Result<Vec<Speaker>> {
         }
 
         speakers.push(Speaker::from_ip(src.ip())
-            .chain_err(|| "Failed to get device information")?);
+            .chain_err(|| ErrorKind::ParseError)?);
     }
 
     Ok(speakers)
