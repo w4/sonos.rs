@@ -17,7 +17,7 @@ pub struct Speaker {
     pub software_version: String,
     pub hardware_version: String,
     pub serial_number: String,
-    pub room: String,
+    pub name: String,
     pub uuid: String,
 }
 
@@ -83,7 +83,7 @@ impl Speaker {
             serial_number: element_to_string(device_description
                 .get_child("serialNum")
                 .ok_or("Failed to parse device description")?),
-            room: element_to_string(device_description
+            name: element_to_string(device_description
                 .get_child("roomName")
                 .ok_or("Failed to parse device description")?),
             // we slice the UDN to remove "uuid:"
@@ -104,7 +104,8 @@ impl Speaker {
         }
 
         let mut content = String::new();
-        resp.read_to_string(&mut content);
+        resp.read_to_string(&mut content)
+            .chain_err(|| "Failed to read Sonos topology")?;
 
         // clean up xml so xmltree can read it
         let content = content.replace(

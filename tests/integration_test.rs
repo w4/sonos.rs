@@ -1,5 +1,14 @@
 extern crate sonos;
 
+fn get_speaker() -> sonos::Speaker {
+    let devices = sonos::discover().unwrap();
+
+    devices.into_iter()
+        .find(|d| d.name == "Bedroom")
+        .ok_or("Couldn't find bedroom")
+        .unwrap()
+}
+
 #[test]
 fn can_discover_devices() {
     let devices = sonos::discover().unwrap();
@@ -8,7 +17,7 @@ fn can_discover_devices() {
 
 #[test]
 fn volume() {
-    let device = &sonos::discover().unwrap()[0];
+    let device = get_speaker();
     device.set_volume(2).expect("Failed to get volume");
     assert_eq!(
         device.volume().expect("Failed to get volume"),
@@ -19,7 +28,7 @@ fn volume() {
 
 #[test]
 fn muted() {
-    let device = &sonos::discover().unwrap()[0];
+    let device = get_speaker();
     device.mute().expect("Couldn't mute player");
     assert_eq!(
         device.muted().expect("Failed to get current mute status"),
@@ -34,7 +43,7 @@ fn muted() {
 
 #[test]
 fn playback_state() {
-    let device = &sonos::discover().unwrap()[0];
+    let device = get_speaker();
 
     device.play().expect("Couldn't play track");
     assert!(match device.transport_state().unwrap() {
@@ -60,13 +69,13 @@ fn playback_state() {
 
 #[test]
 fn track_info() {
-    let device = &sonos::discover().unwrap()[0];
+    let device = get_speaker();
     device.track().expect("Failed to get track info");
 }
 
 #[test]
 fn play() {
-    let device = &sonos::discover().unwrap()[0];
+    let device = get_speaker();
     device.play().expect("Failed to play");
     device.pause().expect("Failed to pause");
 }
