@@ -40,7 +40,6 @@ pub enum TransportState {
     PausedPlayback,
     PausedRecording,
     Recording,
-    NoMediaPresent,
     Transitioning,
 }
 
@@ -526,7 +525,6 @@ impl Speaker {
                 "PAUSED_PLAYBACK" => TransportState::PausedPlayback,
                 "PAUSED_RECORDING" => TransportState::PausedRecording,
                 "RECORDING" => TransportState::Recording,
-                "NO_MEDIA_PRESENT" => TransportState::NoMediaPresent,
                 "TRANSITIONING" => TransportState::Transitioning,
                 _ => TransportState::Stopped,
             },
