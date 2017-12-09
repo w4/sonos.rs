@@ -74,6 +74,13 @@ fn track_info() {
 }
 
 #[test]
+fn seek() {
+    let device = get_speaker();
+    device.seek(&std::time::Duration::from_secs(30)).expect("Failed to seek to 30 seconds");
+    assert_eq!(device.track().expect("Failed to get track info").running_time.as_secs(), 30);
+}
+
+#[test]
 fn play() {
     let device = get_speaker();
     device.play().expect("Failed to play");

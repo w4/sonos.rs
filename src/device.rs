@@ -38,6 +38,9 @@ pub enum TransportState {
     Stopped,
     Playing,
     PausedPlayback,
+    PausedRecording,
+    Recording,
+    NoMediaPresent,
     Transitioning,
 }
 
@@ -164,7 +167,7 @@ impl Speaker {
     ) -> Result<Element> {
         let mut headers = Headers::new();
         headers.set(ContentType::xml());
-        headers.set_raw("SOAPAction", format!("{}#{}", service, action));
+        headers.set_raw("SOAPAction", format!("\"{}#{}\"", service, action));
 
         let client = reqwest::Client::new();
         let coordinator = if coordinator { self.coordinator()? } else { self.ip };
@@ -194,14 +197,28 @@ impl Speaker {
         let element =
             Element::parse(request).chain_err(|| "Failed to parse XML from Sonos controller")?;
 
-        Ok(
-            element
-                .get_child("Body")
-                .ok_or("Failed to get body element")?
+        let body = element.get_child("Body")
+            .ok_or("Failed to get body element")?;
+
+        if let Some(fault) = body.get_child("Fault") {
+            let error_code = element_to_string(fault.get_child("detail")
+                .chain_err(|| ErrorKind::ParseError)?
+                .get_child("UPnPError")
+                .chain_err(|| ErrorKind::ParseError)?
+                .get_child("errorCode")
+                .chain_err(|| ErrorKind::ParseError)?)
+                .parse::<u64>()
+                .chain_err(|| ErrorKind::ParseError)?;
+
+            let state = AVTransportError::from(error_code);
+            error!("Got state {:?} from {}#{} call.", state, service, action);
+            Err(ErrorKind::from(state).into())
+        } else {
+            Ok(body
                 .get_child(format!("{}Response", action))
-                .ok_or("Failed to find response element")?
-                .clone(),
-        )
+                .ok_or(format!("Failed to find response element {:?}", element))?
+                .clone())
+        }
     }
 
     /// Play the current track
@@ -340,6 +357,26 @@ impl Speaker {
                   <EnqueuedURIMetaData></EnqueuedURIMetaData>
                   <DesiredFirstTrackNumberEnqueued>0</DesiredFirstTrackNumberEnqueued>
                   <EnqueueAsNext>0</EnqueueAsNext>"#,
+                uri
+            ),
+            true,
+        )?;
+
+        Ok(())
+    }
+
+    pub fn queue_next(&self, uri: &str) -> Result<()> {
+        self.soap(
+            "MediaRenderer/AVTransport/Control",
+            "urn:schemas-upnp-org:service:AVTransport:1",
+            "AddURIToQueue",
+            &format!(
+                r#"
+                  <InstanceID>0</InstanceID>
+                  <EnqueuedURI>{}</EnqueuedURI>
+                  <EnqueuedURIMetaData></EnqueuedURIMetaData>
+                  <DesiredFirstTrackNumberEnqueued>0</DesiredFirstTrackNumberEnqueued>
+                  <EnqueueAsNext>1</EnqueueAsNext>"#,
                 uri
             ),
             true,
@@ -487,6 +524,9 @@ impl Speaker {
                 "STOPPED" => TransportState::Stopped,
                 "PLAYING" => TransportState::Playing,
                 "PAUSED_PLAYBACK" => TransportState::PausedPlayback,
+                "PAUSED_RECORDING" => TransportState::PausedRecording,
+                "RECORDING" => TransportState::Recording,
+                "NO_MEDIA_PRESENT" => TransportState::NoMediaPresent,
                 "TRANSITIONING" => TransportState::Transitioning,
                 _ => TransportState::Stopped,
             },
