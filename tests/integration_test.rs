@@ -83,7 +83,7 @@ fn play() {
 #[test]
 #[should_panic]
 fn fail_on_set_invalid_volume() {
-    sonos::discover().unwrap()[0]
+    get_speaker()
         .set_volume(101)
         .expect_err("Didn't fail on invalid volume");
 }

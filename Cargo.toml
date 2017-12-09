@@ -1,7 +1,7 @@
 [package]
 name = "sonos"
 version = "0.1.0"
-authors = ["Jordan Doyle <jordanjd@amazon.com>"]
+authors = ["Jordan Doyle <jordan@9t9t9.com>"]
 license = "MIT"
 
 [dependencies]

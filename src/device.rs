@@ -3,11 +3,12 @@ extern crate reqwest;
 extern crate xmltree;
 
 use std::net::IpAddr;
+use std::io::Read;
+use std::time::Duration;
 use error::*;
 use self::xmltree::Element;
 use self::reqwest::header::{ContentType, Headers};
 use self::regex::Regex;
-use std::io::Read;
 
 #[derive(Debug)]
 pub struct Speaker {
@@ -28,8 +29,8 @@ pub struct Track {
     pub album: String,
     pub queue_position: u64,
     pub uri: String,
-    pub duration: String,
-    pub relative_time: String,
+    pub duration: Duration,
+    pub running_time: Duration,
 }
 
 #[derive(Debug, PartialEq)]
@@ -269,7 +270,15 @@ impl Speaker {
     }
 
     /// Seek to a time on the current track
-    pub fn seek(&self, hours: &u8, minutes: &u8, seconds: &u8) -> Result<()> {
+    pub fn seek(&self, time: &Duration) -> Result<()> {
+        const SECS_PER_MINUTE: u64 = 60;
+        const MINS_PER_HOUR: u64 = 60;
+        const SECS_PER_HOUR: u64 = 3600;
+
+        let seconds = time.as_secs() % SECS_PER_MINUTE;
+        let minutes = (time.as_secs() / SECS_PER_MINUTE) % MINS_PER_HOUR;
+        let hours = time.as_secs() / SECS_PER_HOUR;
+
         self.soap(
             "MediaRenderer/AVTransport/Control",
             "urn:schemas-upnp-org:service:AVTransport:1",
@@ -504,6 +513,21 @@ impl Speaker {
             .get_child("item")
             .chain_err(|| "Failed to parse XML from Sonos controller")?;
 
+        // convert the given hh:mm:ss to a Duration
+        let duration: Vec<u64> = element_to_string(resp.get_child("TrackDuration")
+            .chain_err(|| "Failed to get track duration")?)
+            .splitn(3, ":")
+            .map(|s| s.parse::<u64>().unwrap())
+            .collect();
+        let duration = Duration::from_secs((duration[0] * 3600) + (duration[1] * 60) + duration[2]);
+
+        let running_time: Vec<u64> = element_to_string(resp.get_child("RelTime")
+            .chain_err(|| "Failed to get relative time")?)
+            .splitn(3, ":")
+            .map(|s| s.parse::<u64>().unwrap())
+            .collect();
+        let running_time = Duration::from_secs((running_time[0] * 3600) + (running_time[1] * 60) + running_time[2]);
+
         Ok(Track {
             title: element_to_string(metadata
                 .get_child("title")
@@ -520,10 +544,8 @@ impl Speaker {
                 .unwrap(),
             uri: element_to_string(resp.get_child("TrackURI")
                 .chain_err(|| "Failed to get track uri")?),
-            duration: element_to_string(resp.get_child("TrackDuration")
-                .chain_err(|| "Failed to get track duration")?),
-            relative_time: element_to_string(resp.get_child("RelTime")
-                .chain_err(|| "Failed to get relative time")?),
+            duration,
+            running_time,
         })
     }
 }
