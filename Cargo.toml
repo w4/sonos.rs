@@ -6,6 +6,7 @@ license = "MIT"
 description = "Sonos controller library for.. controlling Sonos"
 repository = "https://github.com/w4/sonos.rs"
 keywords = ["sonos", "controller", "music"]
+readme = "README.md"
 
 [dependencies]
 clippy = {version = "0.0", optional = true}
