@@ -6,6 +6,7 @@ use std::net::IpAddr;
 use std::io::Read;
 use std::time::Duration;
 use error::*;
+pub(crate) use self::xmltree::ParseError;
 use self::xmltree::Element;
 use self::reqwest::header::{ContentType, Headers};
 use self::regex::Regex;
@@ -43,7 +44,6 @@ pub enum TransportState {
     Transitioning,
 }
 
-
 lazy_static! {
     static ref COORDINATOR_REGEX: Regex = Regex::new(r"^https?://(.+?):1400/xml")
         .expect("Failed to create regex");
@@ -51,7 +51,7 @@ lazy_static! {
 
 /// Get the text of the given element as a String
 fn element_to_string(el: &Element) -> String {
-    el.text.to_owned().unwrap()
+    el.text.to_owned().unwrap_or_default()
 }
 
 impl Speaker {
@@ -64,7 +64,7 @@ impl Speaker {
             return Err(ErrorKind::BadResponse.into());
         }
 
-        let elements = Element::parse(resp).unwrap();
+        let elements = Element::parse(resp)?;
         let device_description = elements
             .get_child("device")
             .chain_err(|| ErrorKind::ParseError)?;
@@ -123,19 +123,17 @@ impl Speaker {
             .chain_err(|| ErrorKind::ParseError)?;
 
         // get the group identifier from the given player
-        let group = zone_players
+        let group = &zone_players
             .children
             .iter()
-            .find(|ref child| child.attributes.get("uuid").unwrap() == &self.uuid)
+            .find(|child| child.attributes["uuid"] == self.uuid)
             .chain_err(|| ErrorKind::DeviceNotFound(self.uuid.to_string()))?
-            .attributes
-            .get("group")
-            .unwrap();
+            .attributes["group"];
 
         Ok(COORDINATOR_REGEX
             .captures(zone_players.children.iter()
                 // get the coordinator for the given group
-                .find(|ref child|
+                .find(|child|
                     child.attributes.get("coordinator").unwrap_or(&"false".to_string()) == "true" &&
                         child.attributes.get("group").unwrap_or(&"".to_string()) == group)
                 .chain_err(|| ErrorKind::DeviceNotFound(self.uuid.to_string()))?
@@ -169,7 +167,11 @@ impl Speaker {
         headers.set_raw("SOAPAction", format!("\"{}#{}\"", service, action));
 
         let client = reqwest::Client::new();
-        let coordinator = if coordinator { self.coordinator()? } else { self.ip };
+        let coordinator = if coordinator {
+            self.coordinator()?
+        } else {
+            self.ip
+        };
 
         debug!("Running {}#{} on {}", service, action, coordinator);
 
@@ -193,14 +195,15 @@ impl Speaker {
             .send()
             .chain_err(|| ErrorKind::DeviceUnreachable)?;
 
-        let element =
-            Element::parse(request).chain_err(|| ErrorKind::ParseError)?;
+        let element = Element::parse(request).chain_err(|| ErrorKind::ParseError)?;
 
-        let body = element.get_child("Body")
+        let body = element
+            .get_child("Body")
             .chain_err(|| ErrorKind::ParseError)?;
 
         if let Some(fault) = body.get_child("Fault") {
-            let error_code = element_to_string(fault.get_child("detail")
+            let error_code = element_to_string(fault
+                .get_child("detail")
                 .chain_err(|| ErrorKind::ParseError)?
                 .get_child("UPnPError")
                 .chain_err(|| ErrorKind::ParseError)?
@@ -213,8 +216,7 @@ impl Speaker {
             error!("Got state {:?} from {}#{} call.", state, service, action);
             Err(ErrorKind::from(state).into())
         } else {
-            Ok(body
-                .get_child(format!("{}Response", action))
+            Ok(body.get_child(format!("{}Response", action))
                 .chain_err(|| ErrorKind::ParseError)?
                 .clone())
         }
@@ -301,9 +303,7 @@ impl Speaker {
             "Seek",
             &format!(
                 "<InstanceID>0</InstanceID><Unit>REL_TIME</Unit><Target>{:02}:{:02}:{:02}</Target>",
-                hours,
-                minutes,
-                seconds
+                hours, minutes, seconds
             ),
             true,
         )?;
@@ -432,7 +432,7 @@ impl Speaker {
             .to_owned()
             .chain_err(|| ErrorKind::ParseError)?
             .parse::<u8>()
-            .unwrap();
+            .chain_err(|| ErrorKind::ParseError)?;
 
         Ok(volume)
     }
@@ -465,7 +465,7 @@ impl Speaker {
             "MediaRenderer/RenderingControl/Control",
             "urn:schemas-upnp-org:service:RenderingControl:1",
             "GetMute",
-            &format!("<InstanceID>0</InstanceID><Channel>Master</Channel>"),
+            "<InstanceID>0</InstanceID><Channel>Master</Channel>",
             false,
         )?;
 
@@ -474,8 +474,7 @@ impl Speaker {
             .as_str()
         {
             "1" => true,
-            "0" => false,
-            _ => false,
+            "0" | _ => false,
         })
     }
 
@@ -520,13 +519,12 @@ impl Speaker {
                 .chain_err(|| ErrorKind::ParseError)?)
                 .as_str()
             {
-                "STOPPED" => TransportState::Stopped,
                 "PLAYING" => TransportState::Playing,
                 "PAUSED_PLAYBACK" => TransportState::PausedPlayback,
                 "PAUSED_RECORDING" => TransportState::PausedRecording,
                 "RECORDING" => TransportState::Recording,
                 "TRANSITIONING" => TransportState::Transitioning,
-                _ => TransportState::Stopped,
+                "STOPPED" | _ => TransportState::Stopped,
             },
         )
     }
@@ -554,17 +552,27 @@ impl Speaker {
         // convert the given hh:mm:ss to a Duration
         let duration: Vec<u64> = element_to_string(resp.get_child("TrackDuration")
             .chain_err(|| ErrorKind::ParseError)?)
-            .splitn(3, ":")
-            .map(|s| s.parse::<u64>().unwrap())
+            .splitn(3, ':')
+            .map(|s| {
+                s.parse::<u64>()
+                    .chain_err(|| ErrorKind::ParseError)
+                    .unwrap()
+            })
             .collect();
         let duration = Duration::from_secs((duration[0] * 3600) + (duration[1] * 60) + duration[2]);
 
         let running_time: Vec<u64> = element_to_string(resp.get_child("RelTime")
             .chain_err(|| ErrorKind::ParseError)?)
-            .splitn(3, ":")
-            .map(|s| s.parse::<u64>().unwrap())
+            .splitn(3, ':')
+            .map(|s| {
+                s.parse::<u64>()
+                    .chain_err(|| ErrorKind::ParseError)
+                    .unwrap()
+            })
             .collect();
-        let running_time = Duration::from_secs((running_time[0] * 3600) + (running_time[1] * 60) + running_time[2]);
+        let running_time = Duration::from_secs(
+            (running_time[0] * 3600) + (running_time[1] * 60) + running_time[2],
+        );
 
         Ok(Track {
             title: element_to_string(metadata
@@ -576,10 +584,9 @@ impl Speaker {
             album: element_to_string(metadata
                 .get_child("album")
                 .chain_err(|| ErrorKind::ParseError)?),
-            queue_position: element_to_string(resp.get_child("Track")
-                .chain_err(|| ErrorKind::ParseError)?)
+            queue_position: element_to_string(resp.get_child("Track").chain_err(|| ErrorKind::ParseError)?)
                 .parse::<u64>()
-                .unwrap(),
+                .chain_err(|| ErrorKind::ParseError)?,
             uri: element_to_string(resp.get_child("TrackURI")
                 .chain_err(|| ErrorKind::ParseError)?),
             duration,

@@ -25,6 +25,11 @@ error_chain! {
             display("Couldn't find a device by the given identifier ({})", identifier)
         }
     }
+
+    foreign_links {
+        Discovery(::discovery::SSDPError) #[doc = "An error occurred while attempting to discover devices"];
+        XMLParse(::device::ParseError) #[doc = "An error occurred while parsing device response"];
+    }
 }
 
 impl From<AVTransportError> for ErrorKind {

@@ -9,7 +9,6 @@ keywords = ["sonos", "controller", "music"]
 readme = "README.md"
 
 [dependencies]
-clippy = {version = "0.0", optional = true}
 reqwest = "0.8"
 log = "0.3"
 ssdp = "0.6"

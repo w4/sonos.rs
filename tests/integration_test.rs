@@ -1,9 +1,12 @@
 extern crate sonos;
 
+use sonos::TransportState;
+
 fn get_speaker() -> sonos::Speaker {
     let devices = sonos::discover().unwrap();
 
-    devices.into_iter()
+    devices
+        .into_iter()
         .find(|d| d.name == "Bedroom")
         .ok_or("Couldn't find bedroom")
         .unwrap()
@@ -12,7 +15,7 @@ fn get_speaker() -> sonos::Speaker {
 #[test]
 fn can_discover_devices() {
     let devices = sonos::discover().unwrap();
-    assert!(devices.len() > 0, "No devices discovered");
+    assert!(!devices.is_empty(), "No devices discovered");
 }
 
 #[test]
@@ -47,22 +50,19 @@ fn playback_state() {
 
     device.play().expect("Couldn't play track");
     assert!(match device.transport_state().unwrap() {
-        sonos::TransportState::Playing => true,
-        sonos::TransportState::Transitioning => true,
+        TransportState::Playing | TransportState::Transitioning => true,
         _ => false,
     });
 
     device.pause().expect("Couldn't pause track");
     assert!(match device.transport_state().unwrap() {
-        sonos::TransportState::PausedPlayback => true,
-        sonos::TransportState::Transitioning => true,
+        TransportState::PausedPlayback | TransportState::Transitioning => true,
         _ => false,
     });
 
     device.stop().expect("Couldn't stop track");
     assert!(match device.transport_state().unwrap() {
-        sonos::TransportState::Stopped => true,
-        sonos::TransportState::Transitioning => true,
+        TransportState::Stopped | TransportState::Transitioning => true,
         _ => false,
     });
 }
@@ -76,8 +76,17 @@ fn track_info() {
 #[test]
 fn seek() {
     let device = get_speaker();
-    device.seek(&std::time::Duration::from_secs(30)).expect("Failed to seek to 30 seconds");
-    assert_eq!(device.track().expect("Failed to get track info").running_time.as_secs(), 30);
+    device
+        .seek(&std::time::Duration::from_secs(30))
+        .expect("Failed to seek to 30 seconds");
+    assert_eq!(
+        device
+            .track()
+            .expect("Failed to get track info")
+            .running_time
+            .as_secs(),
+        30
+    );
 }
 
 #[test]
