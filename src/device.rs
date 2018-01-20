@@ -364,6 +364,7 @@ impl Speaker {
         Ok(())
     }
 
+    /// Add a track to the queue to play next
     pub fn queue_next(&self, uri: &str) -> Result<()> {
         self.soap(
             "MediaRenderer/AVTransport/Control",
