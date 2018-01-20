@@ -13,8 +13,7 @@ extern crate sonos;
 let devices = sonos::discover().unwrap();
 let bedroom = devices.iter()
     .find(|d| d.name == "Bedroom")
-    .ok_or("Couldn't find bedroom")
-    .unwrap();
+    .expect("Couldn't find bedroom");
 
 let track = bedroom.track().unwrap();
 let volume = bedroom.volume().unwrap();
