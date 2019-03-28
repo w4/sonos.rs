@@ -11,7 +11,7 @@ readme = "README.md"
 [dependencies]
 reqwest = "0.8"
 log = "0.3"
-ssdp = "0.6"
+ssdp = "0.7"
 xmltree = "0.6"
 error-chain = "0.11"
 regex = "0.2"
