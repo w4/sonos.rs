@@ -1,6 +1,6 @@
 [package]
 name = "sonos"
-version = "0.1.3"
+version = "0.1.4"
 authors = ["Jordan Doyle <jordan@9t9t9.com>"]
 license = "MIT"
 description = "Sonos controller library for.. controlling Sonos"
