@@ -166,7 +166,7 @@ impl Speaker {
         headers.append(CONTENT_TYPE, HeaderValue::from_static("application/xml"));
         let service_action = format!("\"{}#{}\"", service, action);
         let service_action_headervalue = HeaderValue::from_str(&service_action).unwrap();
-        headers.append(HeaderName::from_static("SOAPAction"), service_action_headervalue);
+        headers.append(HeaderName::from_static("soapaction"), service_action_headervalue);
 
         let client = reqwest::Client::new();
         let coordinator = if coordinator {
