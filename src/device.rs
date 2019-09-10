@@ -8,7 +8,7 @@ use std::time::Duration;
 use error::*;
 pub(crate) use self::xmltree::ParseError;
 use self::xmltree::Element;
-use self::reqwest::header::{ContentType, Headers};
+use self::reqwest::header::HeaderMap;
 use self::regex::Regex;
 
 #[derive(Debug)]
@@ -162,9 +162,10 @@ impl Speaker {
         payload: &str,
         coordinator: bool,
     ) -> Result<Element> {
-        let mut headers = Headers::new();
-        headers.set(ContentType::xml());
-        headers.set_raw("SOAPAction", format!("\"{}#{}\"", service, action));
+        let mut headers = HeaderMap::new();
+        headers.insert("Content-Type", "application/xml".parse().unwrap());
+        headers.insert("SOAPAction", format!("\"{}#{}\"", service, action).parse()
+            .map_err(|_| "service/action caused an invalid header")?);
 
         let client = reqwest::Client::new();
         let coordinator = if coordinator {
