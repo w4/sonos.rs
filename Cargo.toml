@@ -9,7 +9,7 @@ keywords = ["sonos", "controller", "music"]
 readme = "README.md"
 
 [dependencies]
-reqwest = "0.8"
+reqwest = "0.9"
 log = "0.3"
 ssdp = "0.7"
 xmltree = "0.6"
