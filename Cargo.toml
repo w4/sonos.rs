@@ -9,10 +9,10 @@ keywords = ["sonos", "controller", "music"]
 readme = "README.md"
 
 [dependencies]
-reqwest = "0.9"
+reqwest = { version = "0.10", features = ["blocking"] }
 log = "0.4"
 ssdp = "0.7"
-xmltree = "0.8"
+xmltree = "0.10"
 error-chain = "0.12"
 regex = "1"
 lazy_static = "1"

@@ -7,7 +7,7 @@ use std::io::Read;
 use std::time::Duration;
 use error::*;
 pub(crate) use self::xmltree::ParseError;
-use self::xmltree::Element;
+use self::xmltree::{Element, XMLNode};
 use self::reqwest::header::HeaderMap;
 use self::regex::Regex;
 
@@ -51,13 +51,13 @@ lazy_static! {
 
 /// Get the text of the given element as a String
 fn element_to_string(el: &Element) -> String {
-    el.text.to_owned().unwrap_or_default()
+    el.get_text().map(std::borrow::Cow::into_owned).unwrap_or_default()
 }
 
 impl Speaker {
     /// Create a new instance of this struct from an IP address
     pub fn from_ip(ip: IpAddr) -> Result<Speaker> {
-        let resp = reqwest::get(&format!("http://{}:1400/xml/device_description.xml", ip))
+        let resp = reqwest::blocking::get(&format!("http://{}:1400/xml/device_description.xml", ip))
             .chain_err(|| ErrorKind::DeviceUnreachable)?;
 
         if !resp.status().is_success() {
@@ -99,7 +99,7 @@ impl Speaker {
 
     /// Get the coordinator for this speaker.
     pub fn coordinator(&self) -> Result<IpAddr> {
-        let mut resp = reqwest::get(&format!("http://{}:1400/status/topology", self.ip))
+        let mut resp = reqwest::blocking::get(&format!("http://{}:1400/status/topology", self.ip))
             .chain_err(|| ErrorKind::DeviceUnreachable)?;
 
         if !resp.status().is_success() {
@@ -126,12 +126,18 @@ impl Speaker {
         let group = &zone_players
             .children
             .iter()
+            .map(XMLNode::as_element)
+            .filter(Option::is_some)
+            .map(Option::unwrap)
             .find(|child| child.attributes["uuid"] == self.uuid)
             .chain_err(|| ErrorKind::DeviceNotFound(self.uuid.to_string()))?
             .attributes["group"];
 
         Ok(COORDINATOR_REGEX
             .captures(zone_players.children.iter()
+                .map(XMLNode::as_element)
+                .filter(Option::is_some)
+                .map(Option::unwrap)
                 // get the coordinator for the given group
                 .find(|child|
                     child.attributes.get("coordinator").unwrap_or(&"false".to_string()) == "true" &&
@@ -167,7 +173,7 @@ impl Speaker {
         headers.insert("SOAPAction", format!("\"{}#{}\"", service, action).parse()
             .map_err(|_| "service/action caused an invalid header")?);
 
-        let client = reqwest::Client::new();
+        let client = reqwest::blocking::Client::new();
         let coordinator = if coordinator {
             self.coordinator()?
         } else {
@@ -428,11 +434,7 @@ impl Speaker {
             false,
         )?;
 
-        let volume = res.get_child("CurrentVolume")
-            .chain_err(|| ErrorKind::ParseError)?
-            .text
-            .to_owned()
-            .chain_err(|| ErrorKind::ParseError)?
+        let volume = element_to_string(res.get_child("CurrentVolume").chain_err(|| ErrorKind::ParseError)?)
             .parse::<u8>()
             .chain_err(|| ErrorKind::ParseError)?;
 
