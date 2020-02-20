@@ -98,6 +98,7 @@ impl Speaker {
     }
 
     /// Get the coordinator for this speaker.
+    #[deprecated(note = "Broken on Sonos 9.1")]
     pub fn coordinator(&self) -> Result<IpAddr> {
         let mut resp = reqwest::blocking::get(&format!("http://{}:1400/status/topology", self.ip))
             .chain_err(|| ErrorKind::DeviceUnreachable)?;
@@ -118,6 +119,13 @@ impl Speaker {
 
         // parse the topology xml
         let elements = Element::parse(content.as_bytes()).chain_err(|| ErrorKind::ParseError)?;
+
+        if elements.children.is_empty() {
+            // on Sonos 9.1 this API will always return an empty string in which case we'll return
+            // the current speaker's IP as the 'coordinator'
+            return Ok(self.ip);
+        }
+
         let zone_players = elements
             .get_child("ZonePlayers")
             .chain_err(|| ErrorKind::ParseError)?;
