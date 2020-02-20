@@ -593,9 +593,7 @@ impl Speaker {
             artist: element_to_string(metadata
                 .get_child("creator")
                 .chain_err(|| ErrorKind::ParseError)?),
-            album: element_to_string(metadata
-                .get_child("album")
-                .chain_err(|| ErrorKind::ParseError)?),
+            album: metadata.get_child("album").map(element_to_string).unwrap_or_else(|| String::from("Unknown")),
             queue_position: element_to_string(resp.get_child("Track").chain_err(|| ErrorKind::ParseError)?)
                 .parse::<u64>()
                 .chain_err(|| ErrorKind::ParseError)?,
