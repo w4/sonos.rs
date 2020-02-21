@@ -1,15 +1,12 @@
-extern crate regex;
-extern crate reqwest;
-extern crate xmltree;
-
 use std::net::IpAddr;
 use std::io::Read;
 use std::time::Duration;
-use error::*;
-pub(crate) use self::xmltree::ParseError;
-use self::xmltree::{Element, XMLNode};
-use self::reqwest::header::HeaderMap;
-use self::regex::Regex;
+use xmltree::{Element, XMLNode};
+use reqwest::header::HeaderMap;
+use regex::Regex;
+
+use crate::error::*;
+use failure::Error;
 
 #[derive(Debug)]
 pub struct Speaker {
@@ -27,7 +24,7 @@ pub struct Speaker {
 pub struct Track {
     pub title: String,
     pub artist: String,
-    pub album: String,
+    pub album: Option<String>,
     pub queue_position: u64,
     pub uri: String,
     pub duration: Duration,
@@ -56,60 +53,57 @@ fn element_to_string(el: &Element) -> String {
 
 impl Speaker {
     /// Create a new instance of this struct from an IP address
-    pub fn from_ip(ip: IpAddr) -> Result<Speaker> {
-        let resp = reqwest::blocking::get(&format!("http://{}:1400/xml/device_description.xml", ip))
-            .chain_err(|| ErrorKind::DeviceUnreachable)?;
+    pub fn from_ip(ip: IpAddr) -> Result<Speaker, Error> {
+        let resp = reqwest::blocking::get(&format!("http://{}:1400/xml/device_description.xml", ip))?;
 
         if !resp.status().is_success() {
-            return Err(ErrorKind::BadResponse.into());
+            return Err(SonosError::BadResponse(resp.status().as_u16()).into());
         }
 
         let elements = Element::parse(resp)?;
         let device_description = elements
             .get_child("device")
-            .chain_err(|| ErrorKind::ParseError)?;
+            .ok_or_else(|| SonosError::ParseError("missing root element"))?;
 
         Ok(Speaker {
             ip,
             model: element_to_string(device_description
                 .get_child("modelName")
-                .chain_err(|| ErrorKind::ParseError)?),
+                .ok_or_else(|| SonosError::ParseError("missing model name"))?),
             model_number: element_to_string(device_description
                 .get_child("modelNumber")
-                .chain_err(|| ErrorKind::ParseError)?),
+                .ok_or_else(|| SonosError::ParseError("missing model number"))?),
             software_version: element_to_string(device_description
                 .get_child("softwareVersion")
-                .chain_err(|| ErrorKind::ParseError)?),
+                .ok_or_else(|| SonosError::ParseError("missing software version"))?),
             hardware_version: element_to_string(device_description
                 .get_child("hardwareVersion")
-                .chain_err(|| ErrorKind::ParseError)?),
+                .ok_or_else(|| SonosError::ParseError("missing hardware version"))?),
             serial_number: element_to_string(device_description
                 .get_child("serialNum")
-                .chain_err(|| ErrorKind::ParseError)?),
+                .ok_or_else(|| SonosError::ParseError("missing serial number"))?),
             name: element_to_string(device_description
                 .get_child("roomName")
-                .chain_err(|| ErrorKind::ParseError)?),
+                .ok_or_else(|| SonosError::ParseError("missing room name"))?),
             // we slice the UDN to remove "uuid:"
             uuid: element_to_string(device_description
                 .get_child("UDN")
-                .chain_err(|| ErrorKind::ParseError)?)[5..]
+                .ok_or_else(|| SonosError::ParseError("missing UDN"))?)[5..]
                 .to_string(),
         })
     }
 
     /// Get the coordinator for this speaker.
     #[deprecated(note = "Broken on Sonos 9.1")]
-    pub fn coordinator(&self) -> Result<IpAddr> {
-        let mut resp = reqwest::blocking::get(&format!("http://{}:1400/status/topology", self.ip))
-            .chain_err(|| ErrorKind::DeviceUnreachable)?;
+    pub fn coordinator(&self) -> Result<IpAddr, Error> {
+        let mut resp = reqwest::blocking::get(&format!("http://{}:1400/status/topology", self.ip))?;
 
         if !resp.status().is_success() {
-            return Err(ErrorKind::BadResponse.into());
+            return Err(SonosError::BadResponse(resp.status().as_u16()).into());
         }
 
         let mut content = String::new();
-        resp.read_to_string(&mut content)
-            .chain_err(|| ErrorKind::BadResponse)?;
+        resp.read_to_string(&mut content)?;
 
         // clean up xml so xmltree can read it
         let content = content.replace(
@@ -118,7 +112,7 @@ impl Speaker {
         );
 
         // parse the topology xml
-        let elements = Element::parse(content.as_bytes()).chain_err(|| ErrorKind::ParseError)?;
+        let elements = Element::parse(content.as_bytes())?;
 
         if elements.children.is_empty() {
             // on Sonos 9.1 this API will always return an empty string in which case we'll return
@@ -128,7 +122,7 @@ impl Speaker {
 
         let zone_players = elements
             .get_child("ZonePlayers")
-            .chain_err(|| ErrorKind::ParseError)?;
+            .ok_or_else(|| SonosError::ParseError("missing root element"))?;
 
         // get the group identifier from the given player
         let group = &zone_players
@@ -138,25 +132,26 @@ impl Speaker {
             .filter(Option::is_some)
             .map(Option::unwrap)
             .find(|child| child.attributes["uuid"] == self.uuid)
-            .chain_err(|| ErrorKind::DeviceNotFound(self.uuid.to_string()))?
+            .ok_or_else(|| SonosError::DeviceNotFound(self.uuid.to_string()))?
             .attributes["group"];
 
+        let parent = zone_players.children.iter()
+            // get the coordinator for the given group
+            .map(XMLNode::as_element)
+            .filter(Option::is_some)
+            .map(Option::unwrap)
+            .find(|child|
+                child.attributes.get("coordinator").unwrap_or(&"false".to_string()) == "true" &&
+                    child.attributes.get("group").unwrap_or(&"".to_string()) == group)
+            .ok_or_else(|| SonosError::DeviceNotFound(self.uuid.to_string()))?
+            .attributes
+            .get("location")
+            .ok_or_else(|| SonosError::ParseError("missing group identifier"))?;
+
         Ok(COORDINATOR_REGEX
-            .captures(zone_players.children.iter()
-                .map(XMLNode::as_element)
-                .filter(Option::is_some)
-                .map(Option::unwrap)
-                // get the coordinator for the given group
-                .find(|child|
-                    child.attributes.get("coordinator").unwrap_or(&"false".to_string()) == "true" &&
-                        child.attributes.get("group").unwrap_or(&"".to_string()) == group)
-                .chain_err(|| ErrorKind::DeviceNotFound(self.uuid.to_string()))?
-                .attributes
-                .get("location")
-                .chain_err(|| ErrorKind::ParseError)?)
-            .chain_err(|| ErrorKind::ParseError)?[1]
-            .parse()
-            .chain_err(|| ErrorKind::ParseError)?)
+            .captures(parent)
+            .ok_or_else(|| SonosError::ParseError("couldn't parse coordinator url"))?[1]
+            .parse()?)
     }
 
     /// Call the Sonos SOAP endpoint
@@ -175,11 +170,10 @@ impl Speaker {
         action: &str,
         payload: &str,
         coordinator: bool,
-    ) -> Result<Element> {
+    ) -> Result<Element, Error> {
         let mut headers = HeaderMap::new();
-        headers.insert("Content-Type", "application/xml".parse().unwrap());
-        headers.insert("SOAPAction", format!("\"{}#{}\"", service, action).parse()
-            .map_err(|_| "service/action caused an invalid header")?);
+        headers.insert("Content-Type", "application/xml".parse()?);
+        headers.insert("SOAPAction", format!("\"{}#{}\"", service, action).parse()?);
 
         let client = reqwest::blocking::Client::new();
         let coordinator = if coordinator {
@@ -207,38 +201,36 @@ impl Speaker {
                 action = action,
                 payload = payload
             ))
-            .send()
-            .chain_err(|| ErrorKind::DeviceUnreachable)?;
+            .send()?;
 
-        let element = Element::parse(request).chain_err(|| ErrorKind::ParseError)?;
+        let element = Element::parse(request)?;
 
         let body = element
             .get_child("Body")
-            .chain_err(|| ErrorKind::ParseError)?;
+            .ok_or_else(|| SonosError::ParseError("missing root element"))?;
 
         if let Some(fault) = body.get_child("Fault") {
             let error_code = element_to_string(fault
                 .get_child("detail")
-                .chain_err(|| ErrorKind::ParseError)?
-                .get_child("UPnPError")
-                .chain_err(|| ErrorKind::ParseError)?
-                .get_child("errorCode")
-                .chain_err(|| ErrorKind::ParseError)?)
-                .parse::<u64>()
-                .chain_err(|| ErrorKind::ParseError)?;
+                .map(|c| c.get_child("UPnPError"))
+                .flatten()
+                .map(|c| c.get_child("errorCode"))
+                .flatten()
+                .ok_or_else(|| SonosError::ParseError("failed to parse error"))?)
+                .parse::<u64>()?;
 
             let state = AVTransportError::from(error_code);
             error!("Got state {:?} from {}#{} call.", state, service, action);
-            Err(ErrorKind::from(state).into())
+            Err(SonosError::from(state).into())
         } else {
             Ok(body.get_child(format!("{}Response", action))
-                .chain_err(|| ErrorKind::ParseError)?
+                .ok_or_else(|| SonosError::ParseError("failed to find root element"))?
                 .clone())
         }
     }
 
     /// Play the current track
-    pub fn play(&self) -> Result<()> {
+    pub fn play(&self) -> Result<(), Error> {
         self.soap(
             "MediaRenderer/AVTransport/Control",
             "urn:schemas-upnp-org:service:AVTransport:1",
@@ -251,7 +243,7 @@ impl Speaker {
     }
 
     /// Pause the current track
-    pub fn pause(&self) -> Result<()> {
+    pub fn pause(&self) -> Result<(), Error> {
         self.soap(
             "MediaRenderer/AVTransport/Control",
             "urn:schemas-upnp-org:service:AVTransport:1",
@@ -264,7 +256,7 @@ impl Speaker {
     }
 
     /// Stop the current queue
-    pub fn stop(&self) -> Result<()> {
+    pub fn stop(&self) -> Result<(), Error> {
         self.soap(
             "MediaRenderer/AVTransport/Control",
             "urn:schemas-upnp-org:service:AVTransport:1",
@@ -277,7 +269,7 @@ impl Speaker {
     }
 
     /// Skip the current track
-    pub fn next(&self) -> Result<()> {
+    pub fn next(&self) -> Result<(), Error> {
         self.soap(
             "MediaRenderer/AVTransport/Control",
             "urn:schemas-upnp-org:service:AVTransport:1",
@@ -290,7 +282,7 @@ impl Speaker {
     }
 
     /// Go to the previous track
-    pub fn previous(&self) -> Result<()> {
+    pub fn previous(&self) -> Result<(), Error> {
         self.soap(
             "MediaRenderer/AVTransport/Control",
             "urn:schemas-upnp-org:service:AVTransport:1",
@@ -303,7 +295,7 @@ impl Speaker {
     }
 
     /// Seek to a time on the current track
-    pub fn seek(&self, time: &Duration) -> Result<()> {
+    pub fn seek(&self, time: &Duration) -> Result<(), Error> {
         const SECS_PER_MINUTE: u64 = 60;
         const MINS_PER_HOUR: u64 = 60;
         const SECS_PER_HOUR: u64 = 3600;
@@ -327,7 +319,7 @@ impl Speaker {
     }
 
     /// Change the track, beginning at 1
-    pub fn play_queue_item(&self, track: &u64) -> Result<()> {
+    pub fn play_queue_item(&self, track: &u64) -> Result<(), Error> {
         self.soap(
             "MediaRenderer/AVTransport/Control",
             "urn:schemas-upnp-org:service:AVTransport:1",
@@ -343,7 +335,7 @@ impl Speaker {
     }
 
     /// Remove track at index from queue, beginning at 1
-    pub fn remove_track(&self, track: &u64) -> Result<()> {
+    pub fn remove_track(&self, track: &u64) -> Result<(), Error> {
         self.soap(
             "MediaRenderer/AVTransport/Control",
             "urn:schemas-upnp-org:service:AVTransport:1",
@@ -359,7 +351,7 @@ impl Speaker {
     }
 
     /// Add a new track to the end of the queue
-    pub fn queue_track(&self, uri: &str) -> Result<()> {
+    pub fn queue_track(&self, uri: &str) -> Result<(), Error> {
         self.soap(
             "MediaRenderer/AVTransport/Control",
             "urn:schemas-upnp-org:service:AVTransport:1",
@@ -380,7 +372,7 @@ impl Speaker {
     }
 
     /// Add a track to the queue to play next
-    pub fn queue_next(&self, uri: &str) -> Result<()> {
+    pub fn queue_next(&self, uri: &str) -> Result<(), Error> {
         self.soap(
             "MediaRenderer/AVTransport/Control",
             "urn:schemas-upnp-org:service:AVTransport:1",
@@ -401,7 +393,7 @@ impl Speaker {
     }
 
     /// Replace the current track with a new one
-    pub fn play_track(&self, uri: &str) -> Result<()> {
+    pub fn play_track(&self, uri: &str) -> Result<(), Error> {
         self.soap(
             "MediaRenderer/AVTransport/Control",
             "urn:schemas-upnp-org:service:AVTransport:1",
@@ -420,7 +412,7 @@ impl Speaker {
     }
 
     /// Remove every track from the queue
-    pub fn clear_queue(&self) -> Result<()> {
+    pub fn clear_queue(&self) -> Result<(), Error> {
         self.soap(
             "MediaRenderer/AVTransport/Control",
             "urn:schemas-upnp-org:service:AVTransport:1",
@@ -433,7 +425,7 @@ impl Speaker {
     }
 
     /// Get the current volume
-    pub fn volume(&self) -> Result<u8> {
+    pub fn volume(&self) -> Result<u8, Error> {
         let res = self.soap(
             "MediaRenderer/RenderingControl/Control",
             "urn:schemas-upnp-org:service:RenderingControl:1",
@@ -442,15 +434,14 @@ impl Speaker {
             false,
         )?;
 
-        let volume = element_to_string(res.get_child("CurrentVolume").chain_err(|| ErrorKind::ParseError)?)
-            .parse::<u8>()
-            .chain_err(|| ErrorKind::ParseError)?;
+        let volume = element_to_string(res.get_child("CurrentVolume").ok_or_else(|| SonosError::ParseError("failed to find CurrentVolume element"))?)
+            .parse::<u8>()?;
 
         Ok(volume)
     }
 
     /// Set a new volume from 0-100.
-    pub fn set_volume(&self, volume: u8) -> Result<()> {
+    pub fn set_volume(&self, volume: u8) -> Result<(), Error> {
         if volume > 100 {
             panic!("Volume must be between 0 and 100, got {}.", volume);
         }
@@ -472,7 +463,7 @@ impl Speaker {
     }
 
     /// Check if this player is currently muted
-    pub fn muted(&self) -> Result<bool> {
+    pub fn muted(&self) -> Result<bool, Error> {
         let resp = self.soap(
             "MediaRenderer/RenderingControl/Control",
             "urn:schemas-upnp-org:service:RenderingControl:1",
@@ -482,7 +473,7 @@ impl Speaker {
         )?;
 
         Ok(match element_to_string(resp.get_child("CurrentMute")
-            .chain_err(|| ErrorKind::ParseError)?)
+            .ok_or_else(|| SonosError::ParseError("failed to find CurrentMute element"))?)
             .as_str()
         {
             "1" => true,
@@ -491,7 +482,7 @@ impl Speaker {
     }
 
     /// Mute the current player
-    pub fn mute(&self) -> Result<()> {
+    pub fn mute(&self) -> Result<(), Error> {
         self.soap(
             "MediaRenderer/RenderingControl/Control",
             "urn:schemas-upnp-org:service:RenderingControl:1",
@@ -504,7 +495,7 @@ impl Speaker {
     }
 
     /// Unmute the current player
-    pub fn unmute(&self) -> Result<()> {
+    pub fn unmute(&self) -> Result<(), Error> {
         self.soap(
             "MediaRenderer/RenderingControl/Control",
             "urn:schemas-upnp-org:service:RenderingControl:1",
@@ -517,7 +508,7 @@ impl Speaker {
     }
 
     /// Get the transport state of the current player
-    pub fn transport_state(&self) -> Result<TransportState> {
+    pub fn transport_state(&self) -> Result<TransportState, Error> {
         let resp = self.soap(
             "MediaRenderer/AVTransport/Control",
             "urn:schemas-upnp-org:service:AVTransport:1",
@@ -528,7 +519,7 @@ impl Speaker {
 
         Ok(
             match element_to_string(resp.get_child("CurrentTransportState")
-                .chain_err(|| ErrorKind::ParseError)?)
+                .ok_or_else(|| SonosError::ParseError("failed to find CurrentTransportState element"))?)
                 .as_str()
             {
                 "PLAYING" => TransportState::Playing,
@@ -542,7 +533,7 @@ impl Speaker {
     }
 
     /// Get information about the current track
-    pub fn track(&self) -> Result<Track> {
+    pub fn track(&self) -> Result<Track, Error> {
         let resp = self.soap(
             "MediaRenderer/AVTransport/Control",
             "urn:schemas-upnp-org:service:AVTransport:1",
@@ -553,52 +544,43 @@ impl Speaker {
 
         let metadata = Element::parse(
             element_to_string(resp.get_child("TrackMetaData")
-                .chain_err(|| ErrorKind::ParseError)?)
+                .ok_or_else(|| SonosError::ParseError("failed to find TrackMetaData element"))?)
                 .as_bytes(),
-        ).chain_err(|| ErrorKind::ParseError)?;
+        )?;
 
         let metadata = metadata
             .get_child("item")
-            .chain_err(|| ErrorKind::ParseError)?;
+            .ok_or_else(|| SonosError::ParseError("failed to find item element"))?;
 
         // convert the given hh:mm:ss to a Duration
-        let duration: Vec<u64> = element_to_string(resp.get_child("TrackDuration")
-            .chain_err(|| ErrorKind::ParseError)?)
+        let mut duration = element_to_string(resp.get_child("TrackDuration")
+            .ok_or_else(|| SonosError::ParseError("failed to find TrackDuration element"))?)
             .splitn(3, ':')
-            .map(|s| {
-                s.parse::<u64>()
-                    .chain_err(|| ErrorKind::ParseError)
-                    .unwrap()
-            })
-            .collect();
-        let duration = Duration::from_secs((duration[0] * 3600) + (duration[1] * 60) + duration[2]);
+            .map(|s| s.parse::<u64>())
+            .collect::<Vec<Result<u64, std::num::ParseIntError>>>();
+        let duration = Duration::from_secs((duration.remove(0)? * 3600) + (duration.remove(0)? * 60) + duration.remove(0)?);
 
-        let running_time: Vec<u64> = element_to_string(resp.get_child("RelTime")
-            .chain_err(|| ErrorKind::ParseError)?)
+        let mut running_time = element_to_string(resp.get_child("RelTime")
+            .ok_or_else(|| SonosError::ParseError("failed to find RelTime element"))?)
             .splitn(3, ':')
-            .map(|s| {
-                s.parse::<u64>()
-                    .chain_err(|| ErrorKind::ParseError)
-                    .unwrap()
-            })
-            .collect();
+            .map(|s| s.parse::<u64>())
+            .collect::<Vec<Result<u64, std::num::ParseIntError>>>();
         let running_time = Duration::from_secs(
-            (running_time[0] * 3600) + (running_time[1] * 60) + running_time[2],
+            (running_time.remove(0)? * 3600) + (running_time.remove(0)? * 60) + running_time.remove(0)?,
         );
 
         Ok(Track {
             title: element_to_string(metadata
                 .get_child("title")
-                .chain_err(|| ErrorKind::ParseError)?),
+                .ok_or_else(|| SonosError::ParseError("failed to find title element"))?),
             artist: element_to_string(metadata
                 .get_child("creator")
-                .chain_err(|| ErrorKind::ParseError)?),
-            album: metadata.get_child("album").map(element_to_string).unwrap_or_else(|| String::from("Unknown")),
-            queue_position: element_to_string(resp.get_child("Track").chain_err(|| ErrorKind::ParseError)?)
-                .parse::<u64>()
-                .chain_err(|| ErrorKind::ParseError)?,
+                .ok_or_else(|| SonosError::ParseError("failed to find creator element"))?),
+            album: metadata.get_child("album").map(element_to_string),
+            queue_position: element_to_string(resp.get_child("Track").ok_or_else(|| SonosError::ParseError("failed to find track element"))?)
+                .parse::<u64>()?,
             uri: element_to_string(resp.get_child("TrackURI")
-                .chain_err(|| ErrorKind::ParseError)?),
+                .ok_or_else(|| SonosError::ParseError("failed to find TrackURI element"))?),
             duration,
             running_time,
         })

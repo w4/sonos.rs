@@ -1,25 +1,25 @@
-extern crate ssdp;
+use ssdp::FieldMap;
+use ssdp::header::{HeaderMut, HeaderRef, Man, MX, ST};
+use ssdp::message::{Multicast, SearchRequest, SearchResponse};
 
-use self::ssdp::FieldMap;
-use self::ssdp::header::{HeaderMut, HeaderRef, Man, MX, ST};
-use self::ssdp::message::{Multicast, SearchRequest, SearchResponse};
-pub(crate) use self::ssdp::SSDPError;
-use device::Speaker;
-use error::*;
+use failure::{Error, SyncFailure};
+
+use crate::device::Speaker;
+use crate::error::*;
 
 const SONOS_URN: &str = "schemas-upnp-org:device:ZonePlayer:1";
 
 /// Convenience method to grab a header from an SSDP search as a string.
-fn get_header(msg: &SearchResponse, header: &str) -> Result<String> {
-    let bytes = msg.get_raw(header).chain_err(|| ErrorKind::ParseError)?;
+fn get_header(msg: &SearchResponse, header: &str) -> Result<String, Error> {
+    let bytes = msg.get_raw(header).ok_or_else(|| SonosError::ParseError("failed to find header"))?;
 
-    String::from_utf8(bytes[0].clone()).chain_err(|| ErrorKind::ParseError)
+    Ok(String::from_utf8(bytes[0].clone())?)
 }
 
 /// Discover all speakers on the current network.
 ///
 /// This method **will** block for 2 seconds while waiting for broadcast responses.
-pub fn discover() -> Result<Vec<Speaker>> {
+pub fn discover() -> Result<Vec<Speaker>, Error> {
     let mut request = SearchRequest::new();
 
     request.set(Man); // required header for discovery
@@ -28,7 +28,7 @@ pub fn discover() -> Result<Vec<Speaker>> {
 
     let mut speakers = Vec::new();
 
-    for (msg, src) in request.multicast()? {
+    for (msg, src) in request.multicast().map_err(SyncFailure::new)? {
         let usn = get_header(&msg, "USN")?;
 
         if !usn.contains(SONOS_URN) {
@@ -36,7 +36,7 @@ pub fn discover() -> Result<Vec<Speaker>> {
             continue;
         }
 
-        speakers.push(Speaker::from_ip(src.ip()).chain_err(|| ErrorKind::ParseError)?);
+        speakers.push(Speaker::from_ip(src.ip())?);
     }
 
     Ok(speakers)

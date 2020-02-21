@@ -1,40 +1,20 @@
-error_chain! {
-    errors {
-        AVTransportError(error: AVTransportError) {
-            description("An error occurred from AVTransport")
-            display("Received error {:?} from Sonos speaker", error)
-        }
-
-        ParseError {
-            description("An error occurred when attempting to parse SOAP XML from Sonos")
-            display("Failed to parse Sonos response XML")
-        }
-
-        DeviceUnreachable {
-            description("An error occurred when attempting to contact the device")
-            display("Failed to call Sonos endpoint")
-        }
-
-        BadResponse {
-            description("The device returned a bad response")
-            display("Received a non-success response from Sonos")
-        }
-
-        DeviceNotFound(identifier: String) {
-            description("An error occurred when trying to find device")
-            display("Couldn't find a device by the given identifier ({})", identifier)
-        }
-    }
-
-    foreign_links {
-        Discovery(::discovery::SSDPError) #[doc = "An error occurred while attempting to discover devices"];
-        XMLParse(::device::ParseError) #[doc = "An error occurred while parsing device response"];
-    }
+#[derive(Debug, Fail)]
+pub enum SonosError {
+    #[fail(display = "Received error {:?} from Sonos speaker", 0)]
+    AVTransportError(AVTransportError),
+    #[fail(display = "Failed to parse Sonos response XML ({})", 0)]
+    ParseError(&'static str),
+    #[fail(display = "Failed to call Sonos endpoint")]
+    DeviceUnreachable,
+    #[fail(display = "Received a non-success ({}) response from Sonos", 0)]
+    BadResponse(u16),
+    #[fail(display = "Couldn't find a device by the given identifier ({})", 0)]
+    DeviceNotFound(String),
 }
 
-impl From<AVTransportError> for ErrorKind {
+impl From<AVTransportError> for SonosError {
     fn from(error: AVTransportError) -> Self {
-        ErrorKind::AVTransportError(error)
+        SonosError::AVTransportError(error)
     }
 }
 
