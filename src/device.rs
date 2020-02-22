@@ -1,6 +1,6 @@
 use std::net::IpAddr;
-use std::io::Read;
 use std::time::Duration;
+
 use xmltree::{Element, XMLNode};
 use reqwest::header::HeaderMap;
 use regex::Regex;
@@ -53,14 +53,14 @@ fn element_to_string(el: &Element) -> String {
 
 impl Speaker {
     /// Create a new instance of this struct from an IP address
-    pub fn from_ip(ip: IpAddr) -> Result<Speaker, Error> {
-        let resp = reqwest::blocking::get(&format!("http://{}:1400/xml/device_description.xml", ip))?;
+    pub async fn from_ip(ip: IpAddr) -> Result<Speaker, Error> {
+        let resp = reqwest::get(&format!("http://{}:1400/xml/device_description.xml", ip)).await?;
 
         if !resp.status().is_success() {
             return Err(SonosError::BadResponse(resp.status().as_u16()).into());
         }
 
-        let elements = Element::parse(resp)?;
+        let elements = Element::parse(resp.bytes().await?.as_ref())?;
         let device_description = elements
             .get_child("device")
             .ok_or_else(|| SonosError::ParseError("missing root element"))?;
@@ -95,21 +95,14 @@ impl Speaker {
 
     /// Get the coordinator for this speaker.
     #[deprecated(note = "Broken on Sonos 9.1")]
-    pub fn coordinator(&self) -> Result<IpAddr, Error> {
-        let mut resp = reqwest::blocking::get(&format!("http://{}:1400/status/topology", self.ip))?;
+    pub async fn coordinator(&self) -> Result<IpAddr, Error> {
+        let resp = reqwest::get(&format!("http://{}:1400/status/topology", self.ip)).await?;
 
         if !resp.status().is_success() {
             return Err(SonosError::BadResponse(resp.status().as_u16()).into());
         }
 
-        let mut content = String::new();
-        resp.read_to_string(&mut content)?;
-
-        // clean up xml so xmltree can read it
-        let content = content.replace(
-            "<?xml-stylesheet type=\"text/xsl\" href=\"/xml/review.xsl\"?>",
-            "",
-        );
+        let content = resp.text().await?;
 
         // parse the topology xml
         let elements = Element::parse(content.as_bytes())?;
@@ -163,7 +156,7 @@ impl Speaker {
     /// * `payload` - XML doc to pass inside the action call body
     /// * `coordinator` - Whether this SOAP call should be performed on the group coordinator or
     ///                   the speaker it was called on
-    pub fn soap(
+    pub async fn soap(
         &self,
         endpoint: &str,
         service: &str,
@@ -175,9 +168,9 @@ impl Speaker {
         headers.insert("Content-Type", "application/xml".parse()?);
         headers.insert("SOAPAction", format!("\"{}#{}\"", service, action).parse()?);
 
-        let client = reqwest::blocking::Client::new();
+        let client = reqwest::Client::new();
         let coordinator = if coordinator {
-            self.coordinator()?
+            self.coordinator().await?
         } else {
             self.ip
         };
@@ -201,9 +194,10 @@ impl Speaker {
                 action = action,
                 payload = payload
             ))
-            .send()?;
+            .send()
+            .await?;
 
-        let element = Element::parse(request)?;
+        let element = Element::parse(request.bytes().await?.as_ref())?;
 
         let body = element
             .get_child("Body")
@@ -230,72 +224,72 @@ impl Speaker {
     }
 
     /// Play the current track
-    pub fn play(&self) -> Result<(), Error> {
+    pub async fn play(&self) -> Result<(), Error> {
         self.soap(
             "MediaRenderer/AVTransport/Control",
             "urn:schemas-upnp-org:service:AVTransport:1",
             "Play",
             "<InstanceID>0</InstanceID><Speed>1</Speed>",
             true,
-        )?;
+        ).await?;
 
         Ok(())
     }
 
     /// Pause the current track
-    pub fn pause(&self) -> Result<(), Error> {
+    pub async fn pause(&self) -> Result<(), Error> {
         self.soap(
             "MediaRenderer/AVTransport/Control",
             "urn:schemas-upnp-org:service:AVTransport:1",
             "Pause",
             "<InstanceID>0</InstanceID>",
             true,
-        )?;
+        ).await?;
 
         Ok(())
     }
 
     /// Stop the current queue
-    pub fn stop(&self) -> Result<(), Error> {
+    pub async fn stop(&self) -> Result<(), Error> {
         self.soap(
             "MediaRenderer/AVTransport/Control",
             "urn:schemas-upnp-org:service:AVTransport:1",
             "Stop",
             "<InstanceID>0</InstanceID>",
             true,
-        )?;
+        ).await?;
 
         Ok(())
     }
 
     /// Skip the current track
-    pub fn next(&self) -> Result<(), Error> {
+    pub async fn next(&self) -> Result<(), Error> {
         self.soap(
             "MediaRenderer/AVTransport/Control",
             "urn:schemas-upnp-org:service:AVTransport:1",
             "Next",
             "<InstanceID>0</InstanceID>",
             true,
-        )?;
+        ).await?;
 
         Ok(())
     }
 
     /// Go to the previous track
-    pub fn previous(&self) -> Result<(), Error> {
+    pub async fn previous(&self) -> Result<(), Error> {
         self.soap(
             "MediaRenderer/AVTransport/Control",
             "urn:schemas-upnp-org:service:AVTransport:1",
             "Previous",
             "<InstanceID>0</InstanceID>",
             true,
-        )?;
+        ).await?;
 
         Ok(())
     }
 
     /// Seek to a time on the current track
-    pub fn seek(&self, time: &Duration) -> Result<(), Error> {
+    pub async fn seek(&self, time: &Duration) -> Result<(), Error> {
         const SECS_PER_MINUTE: u64 = 60;
         const MINS_PER_HOUR: u64 = 60;
         const SECS_PER_HOUR: u64 = 3600;
@@ -313,13 +307,13 @@ impl Speaker {
                 hours, minutes, seconds
             ),
             true,
-        )?;
+        ).await?;
 
         Ok(())
     }
 
     /// Change the track, beginning at 1
-    pub fn play_queue_item(&self, track: &u64) -> Result<(), Error> {
+    pub async fn play_queue_item(&self, track: &u64) -> Result<(), Error> {
         self.soap(
             "MediaRenderer/AVTransport/Control",
             "urn:schemas-upnp-org:service:AVTransport:1",
@@ -329,13 +323,13 @@ impl Speaker {
                 track
             ),
             true,
-        )?;
+        ).await?;
 
         Ok(())
     }
 
     /// Remove track at index from queue, beginning at 1
-    pub fn remove_track(&self, track: &u64) -> Result<(), Error> {
+    pub async fn remove_track(&self, track: &u64) -> Result<(), Error> {
         self.soap(
             "MediaRenderer/AVTransport/Control",
             "urn:schemas-upnp-org:service:AVTransport:1",
@@ -345,13 +339,13 @@ impl Speaker {
                 track
             ),
             true,
-        )?;
+        ).await?;
 
         Ok(())
     }
 
     /// Add a new track to the end of the queue
-    pub fn queue_track(&self, uri: &str) -> Result<(), Error> {
+    pub async fn queue_track(&self, uri: &str) -> Result<(), Error> {
         self.soap(
             "MediaRenderer/AVTransport/Control",
             "urn:schemas-upnp-org:service:AVTransport:1",
@@ -366,13 +360,13 @@ impl Speaker {
                 uri
             ),
             true,
-        )?;
+        ).await?;
 
         Ok(())
     }
 
     /// Add a track to the queue to play next
-    pub fn queue_next(&self, uri: &str) -> Result<(), Error> {
+    pub async fn queue_next(&self, uri: &str) -> Result<(), Error> {
         self.soap(
             "MediaRenderer/AVTransport/Control",
             "urn:schemas-upnp-org:service:AVTransport:1",
@@ -387,13 +381,13 @@ impl Speaker {
                 uri
             ),
             true,
-        )?;
+        ).await?;
 
         Ok(())
     }
 
     /// Replace the current track with a new one
-    pub fn play_track(&self, uri: &str) -> Result<(), Error> {
+    pub async fn play_track(&self, uri: &str) -> Result<(), Error> {
         self.soap(
             "MediaRenderer/AVTransport/Control",
             "urn:schemas-upnp-org:service:AVTransport:1",
@@ -406,42 +400,42 @@ impl Speaker {
                 uri
             ),
             true,
-        )?;
+        ).await?;
 
         Ok(())
     }
 
     /// Remove every track from the queue
-    pub fn clear_queue(&self) -> Result<(), Error> {
+    pub async fn clear_queue(&self) -> Result<(), Error> {
         self.soap(
             "MediaRenderer/AVTransport/Control",
             "urn:schemas-upnp-org:service:AVTransport:1",
             "RemoveAllTracksFromQueue",
             "<InstanceID>0</InstanceID>",
             true,
-        )?;
+        ).await?;
 
         Ok(())
     }
 
     /// Get the current volume
-    pub fn volume(&self) -> Result<u8, Error> {
+    pub async fn volume(&self) -> Result<u8, Error> {
         let res = self.soap(
             "MediaRenderer/RenderingControl/Control",
             "urn:schemas-upnp-org:service:RenderingControl:1",
             "GetVolume",
             "<InstanceID>0</InstanceID><Channel>Master</Channel>",
             false,
-        )?;
+        ).await?;
 
-        let volume = element_to_string(res.get_child("CurrentVolume").ok_or_else(|| SonosError::ParseError("failed to find CurrentVolume element"))?)
-            .parse::<u8>()?;
+        let volume_element = res.get_child("CurrentVolume").ok_or_else(|| SonosError::ParseError("failed to find CurrentVolume element"))?;
+        let volume = element_to_string(volume_element).parse::<u8>()?;
 
         Ok(volume)
     }
 
     /// Set a new volume from 0-100.
-    pub fn set_volume(&self, volume: u8) -> Result<(), Error> {
+    pub async fn set_volume(&self, volume: u8) -> Result<(), Error> {
         if volume > 100 {
             panic!("Volume must be between 0 and 100, got {}.", volume);
         }
@@ -458,89 +452,87 @@ impl Speaker {
                 volume
             ),
             false,
-        )?;
+        ).await?;
+
         Ok(())
     }
 
     /// Check if this player is currently muted
-    pub fn muted(&self) -> Result<bool, Error> {
+    pub async fn muted(&self) -> Result<bool, Error> {
         let resp = self.soap(
             "MediaRenderer/RenderingControl/Control",
             "urn:schemas-upnp-org:service:RenderingControl:1",
             "GetMute",
             "<InstanceID>0</InstanceID><Channel>Master</Channel>",
             false,
-        )?;
+        ).await?;
 
-        Ok(match element_to_string(resp.get_child("CurrentMute")
-            .ok_or_else(|| SonosError::ParseError("failed to find CurrentMute element"))?)
-            .as_str()
-        {
+        let mute_element = resp.get_child("CurrentMute").ok_or_else(|| SonosError::ParseError("failed to find CurrentMute element"))?;
+
+        Ok(match element_to_string(mute_element).as_str() {
             "1" => true,
             "0" | _ => false,
         })
     }
 
     /// Mute the current player
-    pub fn mute(&self) -> Result<(), Error> {
+    pub async fn mute(&self) -> Result<(), Error> {
         self.soap(
             "MediaRenderer/RenderingControl/Control",
             "urn:schemas-upnp-org:service:RenderingControl:1",
             "SetMute",
             "<InstanceID>0</InstanceID><Channel>Master</Channel><DesiredMute>1</DesiredMute>",
             false,
-        )?;
+        ).await?;
 
         Ok(())
     }
 
     /// Unmute the current player
-    pub fn unmute(&self) -> Result<(), Error> {
+    pub async fn unmute(&self) -> Result<(), Error> {
         self.soap(
             "MediaRenderer/RenderingControl/Control",
             "urn:schemas-upnp-org:service:RenderingControl:1",
             "SetMute",
             "<InstanceID>0</InstanceID><Channel>Master</Channel><DesiredMute>0</DesiredMute>",
             false,
-        )?;
+        ).await?;
 
         Ok(())
     }
 
     /// Get the transport state of the current player
-    pub fn transport_state(&self) -> Result<TransportState, Error> {
+    pub async fn transport_state(&self) -> Result<TransportState, Error> {
         let resp = self.soap(
             "MediaRenderer/AVTransport/Control",
             "urn:schemas-upnp-org:service:AVTransport:1",
             "GetTransportInfo",
             "<InstanceID>0</InstanceID>",
             false,
-        )?;
+        ).await?;
 
-        Ok(
-            match element_to_string(resp.get_child("CurrentTransportState")
-                .ok_or_else(|| SonosError::ParseError("failed to find CurrentTransportState element"))?)
-                .as_str()
-            {
-                "PLAYING" => TransportState::Playing,
-                "PAUSED_PLAYBACK" => TransportState::PausedPlayback,
-                "PAUSED_RECORDING" => TransportState::PausedRecording,
-                "RECORDING" => TransportState::Recording,
-                "TRANSITIONING" => TransportState::Transitioning,
-                "STOPPED" | _ => TransportState::Stopped,
-            },
-        )
+        let transport_state_element = resp.get_child("CurrentTransportState")
+            .ok_or_else(|| SonosError::ParseError("failed to find CurrentTransportState element"))?;
+
+        Ok(match element_to_string(transport_state_element).as_str() {
+            "PLAYING" => TransportState::Playing,
+            "PAUSED_PLAYBACK" => TransportState::PausedPlayback,
+            "PAUSED_RECORDING" => TransportState::PausedRecording,
+            "RECORDING" => TransportState::Recording,
+            "TRANSITIONING" => TransportState::Transitioning,
+            "STOPPED" | _ => TransportState::Stopped,
+        })
     }
 
     /// Get information about the current track
-    pub fn track(&self) -> Result<Track, Error> {
+    pub async fn track(&self) -> Result<Track, Error> {
         let resp = self.soap(
             "MediaRenderer/AVTransport/Control",
             "urn:schemas-upnp-org:service:AVTransport:1",
             "GetPositionInfo",
             "<InstanceID>0</InstanceID>",
             true,
-        )?;
+        ).await?;
 
         let metadata = element_to_string(resp.get_child("TrackMetaData")
             .ok_or_else(|| SonosError::ParseError("failed to find TrackMetaData element"))?);

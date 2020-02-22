@@ -1,42 +1,35 @@
-use ssdp::FieldMap;
-use ssdp::header::{HeaderMut, HeaderRef, Man, MX, ST};
-use ssdp::message::{Multicast, SearchRequest, SearchResponse};
-
-use failure::{Error, SyncFailure};
-
 use crate::device::Speaker;
-use crate::error::*;
 
-const SONOS_URN: &str = "schemas-upnp-org:device:ZonePlayer:1";
+use std::time::Duration;
+use regex::Regex;
 
-/// Convenience method to grab a header from an SSDP search as a string.
-fn get_header(msg: &SearchResponse, header: &str) -> Result<String, Error> {
-    let bytes = msg.get_raw(header).ok_or_else(|| SonosError::ParseError("failed to find header"))?;
+use ssdp_client::URN;
+use failure::Error;
 
-    Ok(String::from_utf8(bytes[0].clone())?)
+use futures::prelude::*;
+
+lazy_static! {
+    static ref LOCATION_REGEX: Regex = Regex::new(r"^https?://(.+?):1400/xml")
+        .expect("Failed to create regex");
 }
 
 /// Discover all speakers on the current network.
 ///
 /// This method **will** block for 2 seconds while waiting for broadcast responses.
-pub fn discover() -> Result<Vec<Speaker>, Error> {
-    let mut request = SearchRequest::new();
-
-    request.set(Man); // required header for discovery
-    request.set(MX(2)); // set maximum wait to 2 seconds
-    request.set(ST::Target(FieldMap::URN(String::from(SONOS_URN)))); // we're only looking for sonos
+pub async fn discover() -> Result<Vec<Speaker>, Error> {
+    let search_target = URN::device("schemas-upnp-org", "ZonePlayer", 1).into();
+    let timeout = Duration::from_secs(2);
+    let responses = ssdp_client::search(&search_target, timeout, 1).await?;
+    futures::pin_mut!(responses);
 
     let mut speakers = Vec::new();
 
-    for (msg, src) in request.multicast().map_err(SyncFailure::new)? {
-        let usn = get_header(&msg, "USN")?;
+    while let Some(response) = responses.next().await {
+        let response = response?;
 
-        if !usn.contains(SONOS_URN) {
-            error!("Misbehaving client responded to our discovery ({})", usn);
-            continue;
+        if let Some(ip) = LOCATION_REGEX.captures(response.location()).and_then(|x| x.get(1)).map(|x| x.as_str()) {
+            speakers.push(Speaker::from_ip(ip.parse()?).await?);
         }
-
-        speakers.push(Speaker::from_ip(src.ip())?);
     }
 
     Ok(speakers)
