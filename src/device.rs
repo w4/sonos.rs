@@ -542,11 +542,14 @@ impl Speaker {
             true,
         )?;
 
-        let metadata = Element::parse(
-            element_to_string(resp.get_child("TrackMetaData")
-                .ok_or_else(|| SonosError::ParseError("failed to find TrackMetaData element"))?)
-                .as_bytes(),
-        )?;
+        let metadata = element_to_string(resp.get_child("TrackMetaData")
+            .ok_or_else(|| SonosError::ParseError("failed to find TrackMetaData element"))?);
+
+        if metadata == "NOT_IMPLEMENTED" {
+            return Err(SonosError::ParseError("track information is not supported from the current source").into());
+        }
+
+        let metadata = Element::parse(metadata.as_bytes())?;
 
         let metadata = metadata
             .get_child("item")
