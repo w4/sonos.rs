@@ -397,11 +397,32 @@ impl Speaker {
         })
     }
 
+    /// Groups this Speaker with the given master.
+    ///
+    /// This speaker will be synchronised with the master.
+    pub async fn group(&self, master: &Speaker) -> Result<(), Error> {
+        self.play_track(&format!("x-rincon:{}", master.uuid)).await
+    }
+
+    /// Ungroups this Speaker from any master it might've had.
+    pub async fn ungroup(&self) -> Result<(), Error> {
+        self.soap(
+            "MediaRenderer/AVTransport/Control",
+            "urn:schemas-upnp-org:service:AVTransport:1",
+            "BecomeCoordinatorOfStandaloneGroup",
+            "<InstanceID>0</InstanceID>",
+            true,
+        ).await?;
+
+        Ok(())
+    }
+
+    /// Grab this Speaker's queue to manipulate.
     pub fn queue(&self) -> Queue {
         Queue::for_speaker(self)
     }
 
-    /// Get information about the current track
+    /// Get information about what's currently playing on this Speaker.
     pub async fn track(&self) -> Result<Track, Error> {
         let resp = self.soap(
             "MediaRenderer/AVTransport/Control",
@@ -458,6 +479,7 @@ impl Speaker {
     }
 }
 
+/// An item in the queue.
 pub struct QueueItem {
     pub position: u64,
     pub uri: String,
@@ -468,6 +490,8 @@ pub struct QueueItem {
     pub duration: Duration,
 }
 
+/// Provides some methods for manipulating the queue of the
+/// [Speaker] that spawned this [Queue].
 pub struct Queue<'a> {
     speaker: &'a Speaker,
 }
