@@ -21,3 +21,5 @@ let volume = bedroom.volume().unwrap();
 bedroom.play();
 println!("Now playing {} - {} at {}% volume.", track.title, track.artist, volume);
 ```
+
+For a reference implementation of a CLI for Sonos please see [sonos-cli](https://github.com/w4/sonos-cli).
