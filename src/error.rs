@@ -3,7 +3,7 @@ pub enum SonosError {
     #[fail(display = "Received error {:?} from Sonos speaker", 0)]
     AVTransportError(AVTransportError),
     #[fail(display = "Failed to parse Sonos response XML ({})", 0)]
-    ParseError(&'static str),
+    ParseError(String),
     #[fail(display = "Failed to call Sonos endpoint")]
     DeviceUnreachable,
     #[fail(display = "Received a non-success ({}) response from Sonos", 0)]
