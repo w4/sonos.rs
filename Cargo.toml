@@ -10,11 +10,14 @@ readme = "README.md"
 edition = "2018"
 
 [dependencies]
-reqwest = "0.10"
+reqwest = "0.11"
 log = "0.4"
-ssdp-client = "0.5"
+ssdp-client = "1"
 futures = "0.3"
 xmltree = "0.10"
 failure = "0.1"
 regex = "1"
 lazy_static = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = [ "rt", "macros", "test-util" ], default-features = false }
